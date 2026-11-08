@@ -1,0 +1,158 @@
+# XTun
+
+XTun is an experimental encrypted IPv4 tunnel built on xnet2lua. Packet
+processing is implemented in C, with trusted local Lua configuration. Windows
+uses Wintun and Linux uses TUN. XTun uses its own protocol over DTLS; it does
+not interoperate with WireGuard.
+
+## Current scope
+
+- Windows 10/11 x64 and Linux x64, one tunnel and one peer per process.
+- Explicit IPv4 split routes; default routes and routes containing the outer
+  server endpoint are rejected. DNS settings are not changed.
+- DTLS 1.2 restricted to ECDHE-PSK with ChaCha20-Poly1305 and X25519.
+- A unique, random 32-byte PSK and an expected identity for each peer.
+- 1280-byte inner MTU, authenticated parameter exchange, bounded receive and
+  transmit queues, IPv4 checksum/length and source/destination authorization.
+- Normal-exit cleanup, idle detection, full-handshake session renewal.
+- A no-adapter `--probe` mode for testing the actual secure UDP transport.
+
+The initial command-line version requires administrator/root access to create
+adapters and routes. Service installation, automatic crash recovery, IPv6,
+multiple peers, seamless endpoint migration and GUI are not implemented.
+The UDP address API currently accepts numeric IPv4 addresses only.
+
+## Build
+
+```sh
+git clone --recursive https://github.com/1dao/xtun.git
+cd xtun
+make -j8
+make test
+```
+
+On Windows use MinGW-w64 GCC and `mingw32-make`. On Linux use GCC and GNU Make.
+The bundled Lua runtime and mbedTLS are compiled from `core/`; no system Lua or
+TLS library is needed. The output is `bin/xtun.exe` or `bin/xtun`.
+The DTLS wrapper is owned by XTun in `src/xdtls.c` and `src/xdtls.h`;
+`core/` supplies the unchanged xnet2lua networking and third-party libraries.
+`XNET_ROOT=/path/to/xnet2lua` can select a different core checkout.
+Windows and Linux object directories are separate, allowing WSL and Windows
+builds in the same checkout.
+
+For Windows, put the official, signed x64 `wintun.dll` beside `xtun.exe`.
+Obtain it from [Wintun](https://www.wintun.net/) and retain its distribution
+license. The driver binary is not committed to this repository. XTun loads
+only the DLL adjacent to its executable, not one from the working directory.
+`pwsh -File tools/get_wintun.ps1` downloads version 0.14.1, checks the pinned
+archive SHA-256 and Windows signature, and copies the x64 DLL and license.
+It does not install a driver or create an adapter.
+
+## Configure and run
+
+```sh
+bin/xtun keygen examples/peer.key
+bin/xtun client examples/client.lua --check
+bin/xtun server examples/server.lua --check
+```
+
+`keygen` exclusively creates a new file; it never overwrites an existing key
+or prints the secret. Linux files are created with mode 0600. Windows key
+files have a protected ACL for owner rights, administrators and SYSTEM.
+Transfer the same PSK securely to the other host. Do not share one PSK among
+different clients. Relative `psk_file` paths resolve relative to the Lua file.
+Keep real keys and configurations out of Git.
+
+Edit `examples/client.lua` to set the server's reachable IPv4 address. The
+example addresses are documentation/test networks. Configure the matching
+addresses, identity and key on both hosts. Configuration files execute as
+local Lua code; only load files you trust.
+
+Start the server first, then the client, from an elevated/root terminal:
+
+```sh
+bin/xtun server examples/server.lua
+bin/xtun client examples/client.lua
+```
+
+After `READY`, ping the peer tunnel IP. Only configured routes are installed;
+normal system routing applies to everything else. Ctrl+C performs cleanup.
+
+- `routes`: networks reachable through the peer, also authorized remote packet
+  sources. The peer tunnel address is automatically included as a /32.
+- `local_networks`: server-only authorization for additional networks behind
+  the server. It does **not** install routes, enable kernel forwarding, or
+  configure NAT. The local tunnel address is automatically included.
+- `name`: an unused interface name, at most 15 ASCII letters/digits/`_`/`-`.
+- `bind`, `bind_port`: outer UDP bind address/port. A server defaults to `port`;
+  a client defaults to an ephemeral port.
+- `session_seconds`: full-handshake renewal interval, 30..86400, default 3600.
+- `run_seconds`: optional bounded runtime, default 0 (until interrupted).
+
+Forwarding/NAT are explicit system administration operations. The supplied
+Linux integration test demonstrates them inside isolated namespaces; the app
+does not modify host firewall rules or enable host-wide forwarding.
+
+## Test
+
+`make test` covers real UDP loopback, forced-suite DTLS interoperability,
+handshake loss/timeouts, wrong keys/identities, replay/tampering, reordering,
+send backpressure, receive bounds, IPv4 validation and address authorization.
+`python3 tests/config_test.py` checks CLI and configuration rejection paths
+without modifying the network.
+
+On Linux as root, with `iproute2`, `nftables`, `ping` and Python 3 installed:
+
+```sh
+python3 tests/integration_linux.py
+```
+
+It creates three temporary network namespaces, tests TUN ICMP, forwarding,
+NAT, IPv4 fragmentation, a 2 MiB TCP SHA-256 transfer, UDP echo and session
+renewal, then verifies adapter/route cleanup. Host routes and firewall policy
+remain unchanged. This test is not a throughput benchmark.
+
+On Windows with an Arch Linux WSL distribution already built:
+
+```powershell
+pwsh -File tests/probe_windows.ps1
+```
+
+This tests Windows-to-Linux secure UDP without creating a Windows adapter.
+It is separate from a real, elevated Wintun acceptance test.
+
+## Protocol and operational limits
+
+DTLS authenticates and encrypts the complete application message. Its record
+sequence numbers, nonce construction, replay window and handshake retransmits
+are managed by mbedTLS. There is no custom encryption or data retransmission.
+Inner TCP provides its own reliable delivery; inner UDP remains best effort.
+
+Each application message has an 8-byte header: version (u8, currently 1), type
+(u8), reserved flags (u16, zero), payload length (u32, big endian). Types are
+READY=1, DATA=2, PING=3, PONG=4 and CLOSE=5. DATA contains exactly one IPv4
+packet. READY carries the sender and expected peer IPv4 addresses (u32 each,
+network order), inner MTU (u16), and two zero bytes. PING/PONG carry eight
+opaque bytes; CLOSE has no payload. Control messages and unknown versions
+never reach the virtual adapter.
+
+The single server slot and its input queue are bounded. A candidate handshake
+is pinned to one source tuple for at most 15 seconds; DTLS cookies validate
+that tuple. This is not a hardened multi-client Internet-facing dispatcher:
+unauthenticated traffic can still contend for the single slot. A live session
+does not accept a changed source tuple. Reconnection uses a fresh handshake.
+
+Sessions renew after their configured lifetime or 2^24 sent application
+records; idle sessions expire after 60 seconds. Renewal has a brief packet
+loss window rather than seamless overlapping sessions. Default session
+resumption and renegotiation are disabled. Secrets are cleared on teardown.
+
+Adapter MTU is set to 1280; the OS handles normal IPv4 fragmentation/DF/ICMP
+behavior. The app does not reassemble inner fragments or implement PMTU
+discovery. Packets exceeding the configured inner MTU are dropped and counted.
+The DTLS datagram budget is 1400 bytes; paths requiring smaller outer packets
+need a later configurable MTU/PMTU implementation.
+
+Normal cleanup removes only resources created by the process. Forced process
+termination and host crashes are outside the initial recovery guarantee.
+This implementation and tests do not constitute a security audit.

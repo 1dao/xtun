@@ -1,0 +1,12 @@
+return {
+    bind = "0.0.0.0",
+    port = 51215,
+    identity = "client-1",
+    psk_file = "peer.key",
+    name = "xtun0",
+    address = "10.77.0.1",
+    peer_address = "10.77.0.2",
+    -- Authorization for networks behind this server. This does not install
+    -- routes, enable kernel forwarding, or add NAT rules.
+    local_networks = { "198.19.0.0/24" },
+}

@@ -1,0 +1,45 @@
+XNET_ROOT ?= core
+BIN_DIR ?= bin
+CC = gcc
+AR = ar
+CPPFLAGS += -I$(XNET_ROOT) -I$(XNET_ROOT)/3rd/mbedtls3/include -Isrc -DXNET_WITH_UDP=1 -DXMACRO_USE_RPMALLOC=0
+CFLAGS ?= -O2 -g
+CFLAGS += -std=gnu11 -Wall -Wextra -MMD -MP
+ifeq ($(OS),Windows_NT)
+EXT = .exe
+BUILD ?= build
+LDLIBS += -lws2_32 -lbcrypt -ladvapi32 -liphlpapi
+else
+BUILD ?= build/linux
+LDLIBS += -lpthread -lm
+endif
+MBED_SRCS := $(wildcard $(XNET_ROOT)/3rd/mbedtls3/library/*.c)
+MBED_OBJS := $(patsubst $(XNET_ROOT)/3rd/mbedtls3/library/%.c,$(BUILD)/mbed/%.o,$(MBED_SRCS))
+CORE_NAMES := xudp xpoll xsock xlog
+CORE_OBJS := $(addprefix $(BUILD)/core/,$(addsuffix .o,$(CORE_NAMES)))
+APP_OBJS := $(addprefix $(BUILD)/app/,$(addsuffix .o,main tunnel platform xdtls))
+TEST_APP_OBJS := $(filter-out $(BUILD)/app/main.o,$(APP_OBJS))
+.PHONY: all test clean
+all: $(BIN_DIR)/xtun$(EXT)
+test: $(BIN_DIR)/dtls_test$(EXT)
+	./$(BIN_DIR)/dtls_test$(EXT)
+$(BUILD)/mbed/%.o: $(XNET_ROOT)/3rd/mbedtls3/library/%.c
+	@mkdir -p $(BUILD)/mbed
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+$(BUILD)/core/%.o: $(XNET_ROOT)/%.c
+	@mkdir -p $(BUILD)/core
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+$(BUILD)/app/%.o: src/%.c
+	@mkdir -p $(BUILD)/app
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+$(BUILD)/mbedtls.a: $(MBED_OBJS)
+	$(AR) rcs $@ $^
+$(BIN_DIR)/dtls_test$(EXT): tests/dtls_test.c src/xtun.h $(TEST_APP_OBJS) $(CORE_OBJS) $(BUILD)/mbedtls.a
+	@mkdir -p $(BIN_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(TEST_APP_OBJS) $(CORE_OBJS) $(BUILD)/mbedtls.a $(LDLIBS) -o $@
+$(BIN_DIR)/xtun$(EXT): $(APP_OBJS) $(CORE_OBJS) $(BUILD)/mbedtls.a
+	@mkdir -p $(BIN_DIR)
+	$(CC) $(CFLAGS) $(APP_OBJS) $(CORE_OBJS) $(BUILD)/mbedtls.a $(LDLIBS) -o $@
+-include $(wildcard $(BUILD)/core/*.d $(BUILD)/app/*.d $(BUILD)/mbed/*.d)
+clean:
+	$(RM) $(BUILD)/core/*.o $(BUILD)/core/*.d $(BUILD)/app/*.o $(BUILD)/app/*.d $(BUILD)/mbed/*.o $(BUILD)/mbed/*.d $(BUILD)/mbedtls.a $(BIN_DIR)/xtun$(EXT) $(BIN_DIR)/dtls_test$(EXT)
