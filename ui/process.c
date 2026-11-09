@@ -21,6 +21,13 @@ int ui_admin(void) {
     }
     return admin;
 }
+int ui_font_path(char *path, size_t size) {
+    UINT length = GetWindowsDirectoryA(path, (UINT)size);
+    static const char font[] = "\\Fonts\\segoeui.ttf";
+    if (!length || length >= size || sizeof(font) > size - length) return 0;
+    memcpy(path + length, font, sizeof(font));
+    return 1;
+}
 int ui_choose_config(char *path, size_t size) {
     OPENFILENAMEA picker = {0};
     picker.lStructSize = sizeof(picker);
