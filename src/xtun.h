@@ -12,7 +12,6 @@ typedef struct { uint32_t network, mask; unsigned prefix; } XtRoute;
 typedef struct {
     int server, check, probe, full_tunnel, managed;
     char bind_ip[64], remote_ip[64], identity[65], name[32];
-    char key_file[1024];
     unsigned port, bind_port, run_seconds, session_seconds;
     uint32_t address, peer_address, endpoint_address, dns_address;
     unsigned char key[32];

@@ -71,7 +71,7 @@ Start-Process .\bin\xtun-gui.exe -Verb RunAs -WorkingDirectory (Get-Location).Pa
 
 Use **+** beside the profile list to add a tagged connection to that
 `client.cfg`. The first save creates the file if needed. Removing a
-connection deletes its tagged fields and keeps the key file.
+connection deletes its tagged fields. A top-level shared `psk` remains in the CFG.
 
 Select a profile to view its routing mode and tunnel addresses. Only one
 profile runs at a time. When switching profiles, the current client exits
@@ -89,17 +89,19 @@ directory on both sides:
 
 ```sh
 cd examples
-../bin/xtun keygen peer.key
+../bin/xtun keygen
+# Paste the same generated value into psk= in client.cfg and server.cfg.
 ../bin/xtun client --check
 ../bin/xtun server --check
 ```
 
-`keygen` exclusively creates a new file; it never overwrites an existing key
-or prints the secret. Linux files are created with mode 0600. Windows key
-files have a protected ACL for owner rights, administrators and SYSTEM.
-Transfer the same PSK securely to the other host. Do not share one PSK among
-different clients. Relative `psk_file` paths resolve relative to the CFG file.
-Keep real keys and configurations out of Git.
+Set `psk` to the same random 32-byte key, encoded as 64 hexadecimal
+characters, on both ends. `xtun keygen` prints a fresh key. In a tagged
+client CFG, `work.psk` overrides the top-level `psk` for the work tag.
+Use separate keys for different clients. Restrict access to CFG files that
+contain keys (for example, `chmod 600 server.cfg` on Linux), and keep their
+real values out of Git. The repository templates intentionally leave
+`psk=` empty.
 
 Edit `examples/client.cfg` to set the server's reachable IPv4 address. The
 example addresses are documentation/test networks. Configure the matching

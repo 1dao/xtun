@@ -96,8 +96,7 @@ static int write_tag_fields(FILE *file, const Profile *profile, char *body) {
     return 1;
 }
 
-/* Rewrite just the tag list and one section. A candidate beside the original
- * keeps relative PSK paths the same when the shared parser validates it. */
+/* Rewrite just the tag list and one section, then validate before replacing. */
 static int update_config(const Profile *profile, char *body, int creating) {
     XtTag tags[XT_TAG_LIMIT];
     int count = load_tags(tags);
@@ -157,7 +156,7 @@ static const WCHAR *label(Editor *editor, const WCHAR *zh, const WCHAR *en) {
 }
 static int editor_read(Editor *editor) {
     if (editor->creating) {
-        wcscpy(editor->source, L"endpoint=\r\nport=51215\r\nidentity=client-1\r\npsk_file=\r\n"
+        wcscpy(editor->source, L"endpoint=\r\nport=51215\r\nidentity=client-1\r\n"
                                L"name=xtun0\r\naddress=10.77.0.2\r\npeer_address=10.77.0.1\r\n");
         return 1;
     }
@@ -232,8 +231,8 @@ static LRESULT CALLBACK editor_proc(HWND window, UINT msg, WPARAM wp, LPARAM lp)
                               WS_EX_CLIENTEDGE, TAG_FIELD, 389, 36, 207, 25);
         SendMessageW(editor->tag, EM_SETLIMITTEXT, XT_TAG_SIZE - 1, 0);
         SendMessageW(editor->name, EM_SETLIMITTEXT, 40, 0);
-        control(window, L"STATIC", label(editor, L"客户端配置（CFG）。密钥请填写文件路径。",
-                 L"Client configuration (CFG). Set psk_file to the key file path."),
+        control(window, L"STATIC", label(editor, L"客户端配置（CFG）。可设置 psk，或沿用全局密钥。",
+                 L"Client configuration (CFG). Set psk or inherit the shared key."),
                 0, 0, 0, 16, 73, 580, 20);
         editor->cfg = control(window, L"EDIT", editor->source,
                               WS_TABSTOP | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN,
@@ -247,8 +246,8 @@ static LRESULT CALLBACK editor_proc(HWND window, UINT msg, WPARAM wp, LPARAM lp)
     }
     if (msg == WM_COMMAND && LOWORD(wp) == IDOK) {
         if (editor_save(editor)) { editor->saved = 1; DestroyWindow(window); }
-        else MessageBoxW(window, label(editor, L"无法保存。请检查配置名称、标签、CFG 字段和密钥路径。",
-                         L"Could not save. Check the name, tag, CFG fields, and key path."),
+        else MessageBoxW(window, label(editor, L"无法保存。请检查配置名称、标签、CFG 字段和密钥。",
+                         L"Could not save. Check the name, tag, CFG fields, and PSK."),
                          L"XTun", MB_OK | MB_ICONWARNING);
         return 0;
     }

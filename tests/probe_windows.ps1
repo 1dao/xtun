@@ -9,8 +9,9 @@ $linuxAddresses = (& wsl -d archlinux --exec ip -j -4 address show dev eth0) | C
 $linuxIp = $linuxAddresses[0].addr_info[0].local
 & $exe keygen (Join-Path $testDir 'peer.key')
 if ($LASTEXITCODE -ne 0) { throw 'key generation failed' }
-$serverConfig = "bind=0.0.0.0`nport=51216`nidentity=probe`npsk_file=peer.key`naddress=10.77.0.1`npeer_address=10.77.0.2`nrun_seconds=10"
-$clientConfig = "tags=other,work`nother.endpoint=192.0.2.2`nwork.endpoint=$linuxIp`nwork.port=51216`nwork.identity=probe`nwork.psk_file=peer.key`nwork.address=10.77.0.2`nwork.peer_address=10.77.0.1`nwork.run_seconds=8"
+$psk = [IO.File]::ReadAllText((Join-Path $testDir "peer.key"))
+$serverConfig = "bind=0.0.0.0`nport=51216`nidentity=probe`npsk=$psk`naddress=10.77.0.1`npeer_address=10.77.0.2`nrun_seconds=10"
+$clientConfig = "tags=other,work`nother.endpoint=192.0.2.2`nwork.endpoint=$linuxIp`nwork.port=51216`nwork.identity=probe`nwork.psk=$psk`nwork.address=10.77.0.2`nwork.peer_address=10.77.0.1`nwork.run_seconds=8"
 [IO.File]::WriteAllText((Join-Path $testDir 'server.cfg'), $serverConfig)
 [IO.File]::WriteAllText((Join-Path $testDir 'client.cfg'), $clientConfig)
 $start = [Diagnostics.ProcessStartInfo]::new('wsl.exe')
@@ -39,6 +40,7 @@ try {
 } finally {
     if (-not $server.HasExited) { $server.Kill($true); $server.WaitForExit() }
     $server.Dispose()
-    # Keep diagnostics; remove only the generated secret.
+    Remove-Item -LiteralPath (Join-Path $testDir "server.cfg"),(Join-Path $testDir "client.cfg")
+    # Clear the generated secret.
     [IO.File]::WriteAllBytes((Join-Path $testDir 'peer.key'), [byte[]]::new(0))
 }

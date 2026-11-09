@@ -5,17 +5,17 @@
 #include <string.h>
 
 int main(int argc, char **argv) {
-    if (argc == 3 && !strcmp(argv[1], "keygen")) {
+    if ((argc == 2 || argc == 3) && !strcmp(argv[1], "keygen")) {
         unsigned char key[32]; char hex[65];
         if (!xt_random(key, sizeof(key))) return 1;
         for (unsigned i = 0; i < 32; ++i) snprintf(hex + 2*i, 3, "%02x", key[i]);
-        int ok = xt_key_write(argv[2], hex, 64);
+        int ok = argc == 2 ? puts(hex) >= 0 : xt_key_write(argv[2], hex, 64);
         memset(key, 0, sizeof(key)); memset(hex, 0, sizeof(hex));
         if (!ok) fputs("cannot create key file (existing files are never overwritten)\n", stderr);
         return ok ? 0 : 1;
     }
     if (argc < 2 || argc > 5 || (strcmp(argv[1], "client") && strcmp(argv[1], "server"))) {
-        fputs("XTun: DTLS encrypted IPv4 tunnel\nUsage:\n  xtun keygen FILE\n  xtun client [--tag TAG] [--check|--probe]\n  xtun server [--check|--probe]\n", stderr); return 1;
+        fputs("XTun: DTLS encrypted IPv4 tunnel\nUsage:\n  xtun keygen [FILE]\n  xtun client [--tag TAG] [--check|--probe]\n  xtun server [--check|--probe]\n", stderr); return 1;
     }
     XtConfig cfg = {0}; cfg.server = !strcmp(argv[1], "server");
     const char *tag = NULL;

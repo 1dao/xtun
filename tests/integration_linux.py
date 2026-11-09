@@ -55,7 +55,7 @@ def main():
                 ns(name, "ip", "link", "set", interface, "up")
         run(str(BIN), "keygen", str(directory / "peer.key"))
         def config(path, **values):
-            values.update(identity="integration-peer", psk_file="peer.key", run_seconds=60, session_seconds=30)
+            values.update(identity="integration-peer", psk=(directory/"peer.key").read_text(), run_seconds=60, session_seconds=30)
             entries = [f"{key}={','.join(value) if isinstance(value,list) else value}"
                        for key, value in values.items()]
             path.write_text("\n".join(entries)+"\n")

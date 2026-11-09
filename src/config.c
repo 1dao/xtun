@@ -75,14 +75,13 @@ static int read_fields(XtConfig *c, const char *tag) {
         !field_string(tag, "endpoint", c->remote_ip, sizeof(c->remote_ip), "") ||
         !field_string(tag, "identity", c->identity, sizeof(c->identity), NULL) ||
         !field_string(tag, "name", c->name, sizeof(c->name), "xtun0") ||
-        !field_string(tag, "psk_file", c->key_file, sizeof(c->key_file), NULL) ||
         !field_string(tag, "address", local, sizeof(local), NULL) ||
         !field_string(tag, "peer_address", peer, sizeof(peer), NULL) ||
         !field_number(tag, "port", &c->port, 51215, 1, 65535) ||
         !field_number(tag, "bind_port", &c->bind_port, c->server ? c->port : 0, 0, 65535) ||
         !field_number(tag, "run_seconds", &c->run_seconds, 0, 0, 86400) ||
         !field_number(tag, "session_seconds", &c->session_seconds, 3600, 30, 86400)) return 0;
-    if (!*c->identity || !*c->key_file || !*c->name || strlen(c->name) > 15 ||
+    if (!*c->identity || !*c->name || strlen(c->name) > 15 ||
         !xt_parse_ip(local, &c->address) || !xt_parse_ip(peer, &c->peer_address) ||
         c->address == c->peer_address || !xt_parse_ip(c->bind_ip, &bind) ||
         (!c->server && !xt_parse_ip(c->remote_ip, &c->endpoint_address))) return 0;
@@ -132,23 +131,13 @@ int xt_load_config(XtConfig *c, const char *path, const char *tag) {
         }
     }
     int ok = read_fields(c, tag);
+    const char *psk = xt_cfg_value(tag, "psk");
+    if (tag && !psk) psk = xargs_get("psk");
+    char hex[65];
+    if (ok && psk && strlen(psk) == 64) memcpy(hex, psk, sizeof(hex));
+    else ok = 0;
     xargs_cleanup();
-    if (!ok) { fputs("invalid XTun configuration (expected key=value CFG)\n", stderr); return 0; }
-    /* Relative PSK paths are resolved relative to the config, never its content. */
-    if (c->key_file[0] != '/' && c->key_file[0] != '\\' && !(strlen(c->key_file) > 1 && c->key_file[1] == ':')) {
-        const char *slash = strrchr(path, '/'), *back = strrchr(path, '\\');
-        if (!slash || (back && back > slash)) slash = back;
-        if (slash) {
-            char joined[1024]; size_t n = (size_t)(slash - path + 1);
-            if (n + strlen(c->key_file) >= sizeof(joined)) return 0;
-            memcpy(joined, path, n); strcpy(joined + n, c->key_file); strcpy(c->key_file, joined);
-        }
-    }
-    FILE *f = fopen(c->key_file, "rb");
-    if (!f) { fputs("cannot open PSK file\n", stderr); return 0; }
-    char hex[68] = {0}; size_t n = fread(hex, 1, sizeof(hex), f); fclose(f);
-    while (n && (hex[n-1] == '\n' || hex[n-1] == '\r')) --n;
-    if (n != 64) { fputs("PSK must contain exactly 64 hex characters\n", stderr); return 0; }
+    if (!ok) { fputs("invalid XTun configuration or missing 64-hex-character psk\n", stderr); return 0; }
     for (unsigned i = 0; i < 32; ++i) {
         unsigned v = 0;
         for (unsigned j = 0; j < 2; ++j) {
@@ -156,7 +145,8 @@ int xt_load_config(XtConfig *c, const char *path, const char *tag) {
             if (ch >= '0' && ch <= '9') ch -= '0';
             else if (ch >= 'a' && ch <= 'f') ch = ch - 'a' + 10;
             else if (ch >= 'A' && ch <= 'F') ch = ch - 'A' + 10;
-            else { memset(hex, 0, sizeof(hex)); return 0; }
+            else { memset(hex, 0, sizeof(hex)); memset(c->key, 0, sizeof(c->key));
+                   fputs("psk must contain exactly 64 hex characters\n", stderr); return 0; }
             v = v * 16 + ch;
         }
         c->key[i] = (unsigned char)v;

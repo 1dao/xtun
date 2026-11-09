@@ -19,7 +19,7 @@ enum ConnectionState { DISCONNECTED, CONNECTING, CONNECTED, RECONNECTING, STOPPI
     X(CONNECTION, "连接配置", "Connection") \
     X(EDIT, "编辑", "Edit") \
     X(REMOVE, "移除", "Remove") \
-    X(REMOVE_HINT, "从 client.cfg 移除此配置？密钥文件会保留。", "Remove this profile from client.cfg? The key file is kept.") \
+    X(REMOVE_HINT, "从 client.cfg 移除此配置？", "Remove this profile from client.cfg?") \
     X(REMOVE_OPTIONS, "移除;取消", "Remove;Cancel") \
     X(SWITCH, "切换连接", "Switch connection") \
     X(DETAILS, "隧道信息", "Tunnel details") \
@@ -33,7 +33,7 @@ enum ConnectionState { DISCONNECTED, CONNECTING, CONNECTED, RECONNECTING, STOPPI
     X(EMPTY, "还没有连接配置", "No connection profiles") \
     X(EMPTY_HINT, "点击左侧的 +，新建客户端配置。", "Use + on the left to create a profile.") \
     X(UNAVAILABLE, "配置文件不可用", "Configuration file unavailable") \
-    X(INVALID_CFG, "配置校验失败，请检查 CFG 和密钥文件路径。", "Configuration check failed. Verify the CFG and key file path.") \
+    X(INVALID_CFG, "配置校验失败，请检查 CFG 和密钥。", "Configuration check failed. Verify the CFG and PSK.") \
     X(STORE_ERROR, "无法读取或保存 client.cfg。", "Could not read or save client.cfg.") \
     X(LIMIT, "配置列表已满。", "The profile list is full.") \
     X(EDIT_WHILE_ACTIVE, "请先断开当前隧道，再管理配置。", "Disconnect the current tunnel before managing profiles.") \

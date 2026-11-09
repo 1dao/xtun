@@ -16,7 +16,7 @@ def main():
         original=key.read_bytes()
         assert len(original)==64
         assert call("keygen",key).returncode!=0 and key.read_bytes()==original
-        base=dict(endpoint="192.0.2.2",identity="test-peer",psk_file="peer.key",address="10.77.0.2",peer_address="10.77.0.1")
+        base=dict(endpoint="192.0.2.2",identity="test-peer",psk=original.decode(),address="10.77.0.2",peer_address="10.77.0.1")
         def check(changes,expected,mode="client"):
             config=base|changes
             def encode(value):
@@ -55,7 +55,7 @@ def main():
         path = folder / "client.cfg"
         work = "".join(f"work.{k}={v}\n" for k, v in base.items())
         personal = "".join(f"personal.{k}={v}\n" for k, v in
-                           (base | {"endpoint":"203.0.113.1", "psk_file":"missing.key"}).items())
+                           (base | {"endpoint":"203.0.113.1", "psk":"invalid"}).items())
         path.write_text("tags=work, personal\n" + work + personal)
         assert call("client", "--tag", "work", "--check").returncode == 0
         assert call("client", "--tag", "personal", "--check").returncode != 0
@@ -71,8 +71,12 @@ def main():
         # Untagged fields must never fill missing fields in the selected block.
         path.write_text("tags=work\nidentity=test-peer\n" + work.replace("work.identity=test-peer\n", ""))
         assert call("client", "--tag", "work", "--check").returncode != 0
-        key.write_text("not-a-secret-key")
-        check({},False)
+        path.write_text("tags=work\npsk=" + original.decode() + "\n" +
+                        work.replace("work.psk=" + original.decode() + "\n", ""))
+        assert call("client", "--tag", "work", "--check").returncode == 0
+        path.write_text(path.read_text() + "work.psk=invalid\n")
+        assert call("client", "--tag", "work", "--check").returncode != 0
+        check({"psk":"not-a-secret-key"},False)
         print("PASS CLI/configuration validation, tag isolation, split-route guards, and key handling")
 
 if __name__=="__main__":main()
