@@ -8,8 +8,8 @@ not interoperate with WireGuard.
 ## Current scope
 
 - Windows 10/11 x64 and Linux x64, one tunnel and one peer per process.
-- Explicit IPv4 split routes; default routes and routes containing the outer
-  server endpoint are rejected. DNS settings are not changed.
+- Explicit IPv4 split routes by default, with opt-in IPv4 full tunneling
+  and optional per-adapter DNS on Windows clients.
 - DTLS 1.2 restricted to ECDHE-PSK with ChaCha20-Poly1305 and X25519.
 - A unique, random 32-byte PSK and an expected identity for each peer.
 - 1280-byte inner MTU, authenticated parameter exchange, bounded receive and
@@ -75,8 +75,8 @@ bin/xtun server examples/server.lua
 bin/xtun client examples/client.lua
 ```
 
-After `READY`, ping the peer tunnel IP. Only configured routes are installed;
-normal system routing applies to everything else. Ctrl+C performs cleanup.
+After `READY`, ping the peer tunnel IP. In split mode, only configured routes
+are installed. Ctrl+C performs cleanup.
 
 - `routes`: networks reachable through the peer, also authorized remote packet
   sources. The peer tunnel address is automatically included as a /32.
@@ -92,6 +92,23 @@ normal system routing applies to everything else. Ctrl+C performs cleanup.
 Forwarding/NAT are explicit system administration operations. The supplied
 Linux integration test demonstrates them inside isolated namespaces; the app
 does not modify host firewall rules or enable host-wide forwarding.
+
+For IPv4 full tunneling, set `full_tunnel = true` on the Windows client and
+omit `routes`. Keep `bind` unset or set to `0.0.0.0`. On the Linux server
+set `local_networks = { "0.0.0.0/0" }` to authorize forwarding to arbitrary
+IPv4 destinations and receiving their replies. Configure Linux IP forwarding
+and NAT (or return routing) separately. The server still authorizes the
+client's tunnel source address through `routes` and the automatic peer /32.
+
+After peer authentication, the client preserves an IPv4 /32 route for the
+server endpoint on its original interface, then installs two /1 routes on
+Wintun. Existing more-specific routes, including local subnets, can still
+take precedence. Optional `dns = "1.1.1.1"` sets one IPv4 DNS server on
+the Wintun adapter (Windows 10 build 19041 or later). Choose a DNS address
+routed through Wintun. The adapter and its DNS settings are removed on normal
+exit, and startup failures roll back routes created by XTun. IPv6 and
+DNS policy on other interfaces are outside this mode; it does not enforce
+exclusive DNS or provide a kill switch. Restart after changing uplinks.
 
 ## Test
 

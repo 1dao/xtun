@@ -47,10 +47,26 @@ static int load_config(XtConfig *c, const char *path) {
         field_number(L, "session_seconds", &c->session_seconds, 3600, 30, 86400);
     if (ok) {
         c->port = port;
-        uint32_t bind, remote;
+        uint32_t bind;
         ok = *c->identity && *c->name && xt_parse_ip(local, &c->address) &&
              xt_parse_ip(peer, &c->peer_address) && c->address != c->peer_address &&
-             xt_parse_ip(c->bind_ip, &bind) && (c->server || xt_parse_ip(c->remote_ip, &remote));
+             xt_parse_ip(c->bind_ip, &bind) && (c->server || xt_parse_ip(c->remote_ip, &c->endpoint_address));
+        lua_getfield(L, -1, "full_tunnel");
+        if (!lua_isnil(L, -1) && !lua_isboolean(L, -1)) ok = 0;
+        c->full_tunnel = lua_toboolean(L, -1);
+        lua_pop(L, 1);
+#ifndef _WIN32
+        if (c->full_tunnel) ok = 0;
+#endif
+        if (c->full_tunnel && (!ok || c->server || bind || !c->endpoint_address)) ok = 0;
+        lua_getfield(L, -1, "dns");
+        if (!lua_isnil(L, -1)) {
+            const char *dns = lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : NULL;
+            if (!c->full_tunnel || !xt_parse_ip(dns, &c->dns_address) ||
+                !c->dns_address || c->dns_address >= 0xe0000000u ||
+                c->dns_address == c->address || c->dns_address == c->endpoint_address) ok = 0;
+        }
+        lua_pop(L, 1);
         for (const char *p = c->name; *p; ++p)
             if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
                   (*p >= '0' && *p <= '9') || *p == '_' || *p == '-')) ok = 0;
@@ -60,7 +76,8 @@ static int load_config(XtConfig *c, const char *path) {
         c->routes[0] = (XtRoute){c->peer_address, UINT32_MAX, 32}; c->route_count = 1;
         lua_getfield(L, -1, "routes");
         if (!lua_isnil(L, -1)) {
-            if (!lua_istable(L, -1) || lua_rawlen(L, -1) >= XT_MAX_ROUTES) ok = 0;
+            if (!lua_istable(L, -1) || lua_rawlen(L, -1) >= XT_MAX_ROUTES ||
+                (c->full_tunnel && lua_rawlen(L, -1))) ok = 0;
             else for (size_t i = 1; i <= lua_rawlen(L, -1); ++i) {
                 lua_rawgeti(L, -1, i);
                 const char *s = lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : NULL;
@@ -84,17 +101,18 @@ static int load_config(XtConfig *c, const char *path) {
                 lua_rawgeti(L, -1, i);
                 const char *s = lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : NULL;
                 XtRoute r;
-                if (!s || !xt_parse_route(s, &r) || r.prefix == 0) ok = 0;
+                if (!s || !xt_parse_route(s, &r)) ok = 0;
                 else c->local_networks[c->local_count++] = r;
                 lua_pop(L, 1);
             }
         }
         lua_pop(L, 1);
-        uint32_t remote;
-        if (xt_allowed(c, c->address) || (!c->server && xt_parse_ip(c->remote_ip, &remote) && xt_allowed(c, remote))) ok = 0;
+        if (c->full_tunnel) {
+            if (c->endpoint_address == c->address || c->endpoint_address == c->peer_address) ok = 0;
+        } else if (xt_allowed(c, c->address) || (!c->server && xt_allowed(c, c->endpoint_address))) ok = 0;
     }
     lua_close(L);
-    if (!ok) { fputs("invalid IPv4 addresses, name, endpoint, or split routes (default route prohibited)\n", stderr); return 0; }
+    if (!ok) { fputs("invalid IPv4 addresses, name, endpoint, routes, or full_tunnel configuration\n", stderr); return 0; }
     /* Relative PSK paths are resolved relative to the config, never its content. */
     if (c->key_file[0] != '/' && c->key_file[0] != '\\' && !(strlen(c->key_file) > 1 && c->key_file[1] == ':')) {
         const char *slash = strrchr(path, '/'), *back = strrchr(path, '\\');

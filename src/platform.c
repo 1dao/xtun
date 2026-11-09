@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #ifdef _WIN32
+#include <iphlpapi.h>
 #include <netioapi.h>
 #include <bcrypt.h>
 #include <sddl.h>
@@ -25,7 +26,7 @@ struct XtDevice {
     CRITICAL_SECTION lock;
     NET_LUID luid;
     MIB_UNICASTIPADDRESS_ROW address;
-    MIB_IPFORWARD_ROW2 routes[XT_MAX_ROUTES]; unsigned route_count;
+    MIB_IPFORWARD_ROW2 routes[XT_MAX_ROUTES + 3]; unsigned route_count;
     int address_set, failed;
     uint64_t drops;
     unsigned head, count;
@@ -119,19 +120,116 @@ bad:
     snprintf(error, 256, "Windows error %lu (administrator access and adjacent signed wintun.dll required)", GetLastError());
     xt_device_close(d); return NULL;
 }
+static DWORD add_route(XtDevice *d, NET_LUID luid, uint32_t network, UINT8 prefix,
+                       SOCKADDR_INET next_hop, ULONG metric) {
+    MIB_IPFORWARD_ROW2 route;
+    InitializeIpForwardEntry(&route);
+    route.InterfaceLuid = luid;
+    route.DestinationPrefix.Prefix.si_family = AF_INET;
+    route.DestinationPrefix.Prefix.Ipv4.sin_addr.s_addr = htonl(network);
+    route.DestinationPrefix.PrefixLength = prefix;
+    route.NextHop = next_hop;
+    route.Metric = metric;
+    route.Protocol = MIB_IPPROTO_NETMGMT;
+    DWORD status = CreateIpForwardEntry2(&route);
+    if (status == NO_ERROR) d->routes[d->route_count++] = route;
+    return status;
+}
+static void remove_routes(XtDevice *d) {
+    while (d->route_count) {
+        DWORD status = DeleteIpForwardEntry2(&d->routes[--d->route_count]);
+        if (status != NO_ERROR && status != ERROR_NOT_FOUND)
+            fprintf(stderr, "route cleanup failed: %lu\n", status);
+    }
+}
+static DWORD best_route(uint32_t ip, MIB_IPFORWARD_ROW2 *route) {
+    SOCKADDR_INET dest = {0}, source;
+    dest.si_family = AF_INET;
+    dest.Ipv4.sin_addr.s_addr = htonl(ip);
+    DWORD index;
+    DWORD status = GetBestInterfaceEx((struct sockaddr *)&dest, &index);
+    if (status != NO_ERROR) return status;
+    return GetBestRoute2(NULL, index, NULL, &dest, 0, route, &source);
+}
+static DWORD set_adapter_dns(XtDevice *d, uint32_t ip) {
+    /* Windows SDK DNS_INTERFACE_SETTINGS v1, absent in older MinGW headers. */
+    struct {
+        ULONG Version;
+        ULONG64 Flags;
+        PWSTR Domain, NameServer, SearchList;
+        ULONG RegistrationEnabled, RegisterAdapterName, EnableLLMNR, QueryAdapterName;
+        PWSTR ProfileNameServer;
+    } settings = {0};
+    typedef DWORD (WINAPI *SetDnsSettings)(GUID, const void *);
+    HMODULE dll = GetModuleHandleW(L"iphlpapi.dll");
+    FARPROC proc = dll ? GetProcAddress(dll, "SetInterfaceDnsSettings") : NULL;
+    if (!proc) return ERROR_NOT_SUPPORTED;
+    SetDnsSettings set_dns;
+    memcpy(&set_dns, &proc, sizeof(set_dns));
+    GUID guid;
+    DWORD status = ConvertInterfaceLuidToGuid(&d->luid, &guid);
+    if (status != NO_ERROR) return status;
+    WCHAR name[16];
+    if (swprintf(name, sizeof(name)/sizeof(*name), L"%u.%u.%u.%u",
+                 ip >> 24, (ip >> 16) & 255u, (ip >> 8) & 255u, ip & 255u) < 0)
+        return ERROR_INVALID_PARAMETER;
+    settings.Version = 1;
+    settings.Flags = 0x0002; /* DNS_SETTING_NAMESERVER */
+    settings.NameServer = name;
+    return set_dns(guid, &settings);
+}
 int xt_device_routes(XtDevice *d, const XtConfig *c, char error[256]) {
+    SOCKADDR_INET on_link = {0};
+    on_link.si_family = AF_INET;
+    DWORD status;
+    NET_LUID outer_luid = {0};
+    const char *operation = "endpoint route lookup";
+    if (c->full_tunnel) {
+        MIB_IPFORWARD_ROW2 outer;
+        status = best_route(c->endpoint_address, &outer);
+        if (status != NO_ERROR) goto bad;
+        if (outer.InterfaceLuid.Value == d->luid.Value) { status = ERROR_INVALID_PARAMETER; goto bad; }
+        outer_luid = outer.InterfaceLuid;
+        if (outer.DestinationPrefix.PrefixLength != 32) {
+            operation = "endpoint route creation";
+            status = add_route(d, outer.InterfaceLuid, c->endpoint_address, 32, outer.NextHop, outer.Metric);
+            if (status != NO_ERROR) goto bad;
+        }
+    }
+    operation = "tunnel route creation";
     for (unsigned i = 0; i < c->route_count; ++i) {
-        MIB_IPFORWARD_ROW2 route; InitializeIpForwardEntry(&route);
-        route.InterfaceLuid = d->luid;
-        route.DestinationPrefix.Prefix.si_family = AF_INET;
-        route.DestinationPrefix.Prefix.Ipv4.sin_addr.s_addr = htonl(c->routes[i].network);
-        route.DestinationPrefix.PrefixLength = (UINT8)c->routes[i].prefix;
-        route.NextHop.si_family = AF_INET; route.Metric = 5; route.Protocol = MIB_IPPROTO_NETMGMT;
-        DWORD status = CreateIpForwardEntry2(&route);
-        if (status != NO_ERROR) { snprintf(error, 256, "route creation failed: %lu", status); return 0; }
-        d->routes[d->route_count++] = route;
+        const XtRoute *r = &c->routes[i];
+        status = add_route(d, d->luid, r->network, (UINT8)r->prefix, on_link, 5);
+        if (status != NO_ERROR) goto bad;
+    }
+    if (c->full_tunnel) {
+        /* Cover the original default without replacing it or changing its metric. */
+        status = add_route(d, d->luid, 0, 1, on_link, 5);
+        if (status != NO_ERROR) goto bad;
+        status = add_route(d, d->luid, 0x80000000u, 1, on_link, 5);
+        if (status != NO_ERROR) goto bad;
+        MIB_IPFORWARD_ROW2 route;
+        operation = "endpoint route verification";
+        status = best_route(c->endpoint_address, &route);
+        if (status != NO_ERROR) goto bad;
+        if (route.InterfaceLuid.Value != outer_luid.Value || route.DestinationPrefix.PrefixLength != 32) {
+            status = ERROR_INVALID_PARAMETER; goto bad;
+        }
+        if (c->dns_address) {
+            operation = "DNS route verification";
+            status = best_route(c->dns_address, &route);
+            if (status != NO_ERROR) goto bad;
+            if (route.InterfaceLuid.Value != d->luid.Value) { status = ERROR_INVALID_PARAMETER; goto bad; }
+            operation = "Wintun DNS setup";
+            status = set_adapter_dns(d, c->dns_address);
+            if (status != NO_ERROR) goto bad;
+        }
     }
     return 1;
+bad:
+    snprintf(error, 256, "%s failed: %lu", operation, status);
+    remove_routes(d);
+    return 0;
 }
 int xt_device_read(XtDevice *d, void *out, size_t cap) {
     int n = 0; EnterCriticalSection(&d->lock);
@@ -157,7 +255,7 @@ void xt_device_close(XtDevice *d) {
     if (d->stop) SetEvent(d->stop);
     if (d->thread) { WaitForSingleObject(d->thread, INFINITE); CloseHandle(d->thread); }
     if (d->stop) CloseHandle(d->stop);
-    for (unsigned i = 0; i < d->route_count; ++i) DeleteIpForwardEntry2(&d->routes[i]);
+    remove_routes(d);
     if (d->address_set) DeleteUnicastIpAddressEntry(&d->address);
     if (d->session) d->EndSession(d->session);
     if (d->adapter) d->CloseAdapter(d->adapter);

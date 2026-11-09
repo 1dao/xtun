@@ -21,6 +21,7 @@ int xt_parse_route(const char *s, XtRoute *r) {
     return (r->network & r->mask) == r->network;
 }
 int xt_allowed(const XtConfig *c, uint32_t ip) {
+    if (c->full_tunnel) return ip != c->endpoint_address && ip != c->address;
     for (unsigned i = 0; i < c->route_count; ++i)
         if ((ip & c->routes[i].mask) == c->routes[i].network) return 1;
     return 0;
