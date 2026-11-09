@@ -19,7 +19,7 @@ CORE_NAMES := xudp xpoll xsock xlog
 CORE_OBJS := $(addprefix $(BUILD)/core/,$(addsuffix .o,$(CORE_NAMES)))
 APP_OBJS := $(addprefix $(BUILD)/app/,$(addsuffix .o,main tunnel platform xdtls))
 TEST_APP_OBJS := $(filter-out $(BUILD)/app/main.o,$(APP_OBJS))
-.PHONY: all test clean
+.PHONY: all test clean gui
 all: $(BIN_DIR)/xtun$(EXT)
 test: $(BIN_DIR)/dtls_test$(EXT)
 	./$(BIN_DIR)/dtls_test$(EXT)
@@ -41,5 +41,23 @@ $(BIN_DIR)/xtun$(EXT): $(APP_OBJS) $(CORE_OBJS) $(BUILD)/mbedtls.a
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(CFLAGS) $(APP_OBJS) $(CORE_OBJS) $(BUILD)/mbedtls.a $(LDLIBS) -o $@
 -include $(wildcard $(BUILD)/core/*.d $(BUILD)/app/*.d $(BUILD)/mbed/*.d)
+ifeq ($(OS),Windows_NT)
+RAYLIB_ROOT ?= ../../ops/raylib
+RAYGUI_ROOT ?= ../../ops/raygui
+RAYLIB_STATIC ?= $(RAYLIB_ROOT)/src/libraylib.a
+gui: $(BIN_DIR)/xtun.exe $(BIN_DIR)/xtun-gui.exe $(BIN_DIR)/raygui-notices.txt
+$(BIN_DIR)/xtun-gui.exe: ui/client.c ui/process.c ui/process.h $(RAYLIB_STATIC) $(RAYGUI_ROOT)/src/raygui.h
+	@mkdir -p $(BIN_DIR)
+	$(CC) $(filter-out -MMD -MP,$(CFLAGS)) -isystem "$(RAYLIB_ROOT)/src" -isystem "$(RAYGUI_ROOT)/src" -mwindows ui/client.c ui/process.c "$(RAYLIB_STATIC)" -lopengl32 -lgdi32 -lwinmm -lshell32 -lcomdlg32 -ladvapi32 -o $@
+$(BIN_DIR)/raygui-notices.txt: $(wildcard ui/vendor/*LICENSE.txt)
+	@mkdir -p $(BIN_DIR)
+	cat $^ > $@
+else
+gui:
+	@echo "The XTun GUI is available on Windows." && exit 1
+endif
 clean:
 	$(RM) $(BUILD)/core/*.o $(BUILD)/core/*.d $(BUILD)/app/*.o $(BUILD)/app/*.d $(BUILD)/mbed/*.o $(BUILD)/mbed/*.d $(BUILD)/mbedtls.a $(BIN_DIR)/xtun$(EXT) $(BIN_DIR)/dtls_test$(EXT)
+ifeq ($(OS),Windows_NT)
+	$(RM) $(BIN_DIR)/xtun-gui.exe $(BIN_DIR)/raygui-notices.txt
+endif

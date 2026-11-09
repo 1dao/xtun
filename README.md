@@ -19,7 +19,7 @@ not interoperate with WireGuard.
 
 The initial command-line version requires administrator/root access to create
 adapters and routes. Service installation, automatic crash recovery, IPv6,
-multiple peers, seamless endpoint migration and GUI are not implemented.
+multiple peers and seamless endpoint migration are not implemented.
 The UDP address API currently accepts numeric IPv4 addresses only.
 
 ## Build
@@ -47,6 +47,25 @@ only the DLL adjacent to its executable, not one from the working directory.
 `pwsh -File tools/get_wintun.ps1` downloads version 0.14.1, checks the pinned
 archive SHA-256 and Windows signature, and copies the x64 DLL and license.
 It does not install a driver or create an adapter.
+
+## Windows desktop client
+
+The optional desktop client is written in C with raylib and raygui. Build it
+with MinGW-w64 and a Windows x64 static raylib library:
+
+```powershell
+mingw32-make gui RAYLIB_ROOT=C:/source/ops/raylib RAYGUI_ROOT=C:/source/ops/raygui
+```
+
+The default dependency paths point to sibling checkouts under `../../ops`.
+`RAYLIB_STATIC` can override the library path. Keep `xtun-gui.exe`,
+`xtun.exe`, `wintun.dll` and the third-party notices together when distributing
+the build. The GUI needs no Lua script or raygui DLL at runtime.
+
+Launch `bin/xtun-gui.exe` as administrator, choose the same client `.lua`
+configuration used by the CLI, and click **Connect**. The window shows
+connection state and recent client logs. Disconnecting or closing the window
+asks the client process to exit normally so it can remove its network resources.
 
 ## Configure and run
 

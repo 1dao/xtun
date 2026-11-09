@@ -159,6 +159,10 @@ int main(int argc, char **argv) {
     if (argc == 4) {
         if (!strcmp(argv[3], "--check")) cfg.check = 1;
         else if (!strcmp(argv[3], "--probe")) cfg.probe = 1;
+#ifdef _WIN32
+        else if (!cfg.server && !strcmp(argv[3], "--gui-child") &&
+                 GetFileType(GetStdHandle(STD_INPUT_HANDLE)) == FILE_TYPE_PIPE) cfg.managed = 1;
+#endif
         else { fputs("unknown option\n", stderr); return 1; }
     }
     if (!load_config(&cfg, argv[2])) return 1;

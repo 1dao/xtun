@@ -185,6 +185,12 @@ int xt_run(const XtConfig *cfg) {
     xUdpAddress bound; xudp_sockname(t->udp, &bound);
     printf("LISTEN %s:%u mode=%s%s\n", bound.ip, bound.port, cfg->server ? "server" : "client", cfg->probe ? " probe" : ""); fflush(stdout);
     while (!xt_stop && !t->failed) {
+#ifdef _WIN32
+        if (cfg->managed && !PeekNamedPipe(GetStdHandle(STD_INPUT_HANDLE), NULL, 0, NULL, NULL, NULL)) {
+            xt_stop = 1;
+            break;
+        }
+#endif
         t->now = xt_now();
         if (cfg->run_seconds && t->now-start >= (uint64_t)cfg->run_seconds*1000) { rc = cfg->probe && !t->probe_ok ? 1 : 0; break; }
         if (!t->dtls && !cfg->server && t->now >= retry_at && !new_session(t)) { t->failed = 1; break; }
