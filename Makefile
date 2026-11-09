@@ -17,7 +17,7 @@ MBED_SRCS := $(wildcard $(XNET_ROOT)/3rd/mbedtls3/library/*.c)
 MBED_OBJS := $(patsubst $(XNET_ROOT)/3rd/mbedtls3/library/%.c,$(BUILD)/mbed/%.o,$(MBED_SRCS))
 CORE_NAMES := xargs xudp xpoll xsock xlog
 CORE_OBJS := $(addprefix $(BUILD)/core/,$(addsuffix .o,$(CORE_NAMES)))
-APP_OBJS := $(addprefix $(BUILD)/app/,$(addsuffix .o,main tunnel platform xdtls))
+APP_OBJS := $(addprefix $(BUILD)/app/,$(addsuffix .o,main config tunnel platform xdtls))
 TEST_APP_OBJS := $(filter-out $(BUILD)/app/main.o,$(APP_OBJS))
 .PHONY: all test clean gui
 all: $(BIN_DIR)/xtun$(EXT)
@@ -46,9 +46,9 @@ RAYLIB_ROOT ?= ../../ops/raylib
 RAYGUI_ROOT ?= ../../ops/raygui
 RAYLIB_STATIC ?= $(RAYLIB_ROOT)/src/libraylib.a
 gui: $(BIN_DIR)/xtun.exe $(BIN_DIR)/xtun-gui.exe $(BIN_DIR)/raygui-notices.txt
-$(BIN_DIR)/xtun-gui.exe: ui/client.c ui/process.c ui/process.h $(RAYLIB_STATIC) $(RAYGUI_ROOT)/src/raygui.h
+$(BIN_DIR)/xtun-gui.exe: ui/client.c ui/process.c ui/process.h ui/client_config.c ui/client_config.h $(BUILD)/app/config.o $(BUILD)/core/xargs.o $(RAYLIB_STATIC) $(RAYGUI_ROOT)/src/raygui.h
 	@mkdir -p $(BIN_DIR)
-	$(CC) $(filter-out -MMD -MP,$(CFLAGS)) -isystem "$(RAYLIB_ROOT)/src" -isystem "$(RAYGUI_ROOT)/src" -mwindows ui/client.c ui/process.c "$(RAYLIB_STATIC)" -lopengl32 -lgdi32 -lwinmm -lshell32 -lcomdlg32 -ladvapi32 -o $@
+	$(CC) $(CPPFLAGS) $(filter-out -MMD -MP,$(CFLAGS)) -isystem "$(RAYLIB_ROOT)/src" -isystem "$(RAYGUI_ROOT)/src" -mwindows ui/client.c ui/process.c ui/client_config.c $(BUILD)/app/config.o $(BUILD)/core/xargs.o "$(RAYLIB_STATIC)" -lopengl32 -lgdi32 -lwinmm -lshell32 -ladvapi32 -lws2_32 -o $@
 $(BIN_DIR)/raygui-notices.txt: $(wildcard ui/vendor/*LICENSE.txt)
 	@mkdir -p $(BIN_DIR)
 	cat $^ > $@

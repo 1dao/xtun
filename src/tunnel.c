@@ -9,23 +9,6 @@
 enum { READY = 1, DATA, PING, PONG, CLOSE };
 volatile sig_atomic_t xt_stop;
 
-int xt_parse_ip(const char *s, uint32_t *out) {
-    struct in_addr a;
-    if (!s || inet_pton(AF_INET, s, &a) != 1) return 0;
-    *out = ntohl(a.s_addr); return 1;
-}
-int xt_parse_route(const char *s, XtRoute *r) {
-    char ip[64], tail; unsigned prefix;
-    if (!s || sscanf(s, "%63[^/]/%u%c", ip, &prefix, &tail) != 2 || prefix > 32 || !xt_parse_ip(ip, &r->network)) return 0;
-    r->prefix = prefix; r->mask = prefix ? UINT32_MAX << (32 - prefix) : 0;
-    return (r->network & r->mask) == r->network;
-}
-int xt_allowed(const XtConfig *c, uint32_t ip) {
-    if (c->full_tunnel) return ip != c->endpoint_address && ip != c->address;
-    for (unsigned i = 0; i < c->route_count; ++i)
-        if ((ip & c->routes[i].mask) == c->routes[i].network) return 1;
-    return 0;
-}
 static uint32_t be32(const unsigned char *p) { return (uint32_t)p[0]<<24 | (uint32_t)p[1]<<16 | (uint32_t)p[2]<<8 | p[3]; }
 static void put32(unsigned char *p, uint32_t n) { p[0]=n>>24; p[1]=n>>16; p[2]=n>>8; p[3]=n; }
 int xt_packet_valid(const XtConfig *c, const void *bytes, size_t n, int inbound) {

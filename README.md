@@ -62,17 +62,36 @@ The default dependency paths point to sibling checkouts under `../../ops`.
 `xtun.exe`, `wintun.dll` and the third-party notices together when distributing
 the build. The GUI needs no Lua script or raygui DLL at runtime.
 
-Launch `bin/xtun-gui.exe` as administrator, choose the same client `.cfg`
-configuration used by the CLI, and click **Connect**. The window shows
-connection state and recent client logs. Disconnecting or closing the window
-asks the client process to exit normally so it can remove its network resources.
+From the directory where you keep `client.cfg`, launch `xtun-gui.exe` as
+administrator. For example, run this from the project root in PowerShell:
+
+```powershell
+Start-Process .\bin\xtun-gui.exe -Verb RunAs -WorkingDirectory (Get-Location).Path
+```
+
+Use **+** beside the profile list to add a tagged connection to that
+`client.cfg`. The first save creates the file if needed. Removing a
+connection deletes its tagged fields and keeps the key file.
+
+Select a profile to view its routing mode and tunnel addresses. Only one
+profile runs at a time. When switching profiles, the current client exits
+before the next starts. Disconnecting or closing the window asks the client
+to exit normally so it can remove its network resources. Expand the log
+panel to see or copy recent client messages.
 
 ## Configure and run
 
+XTun always reads configuration from the current working directory. The
+server reads `server.cfg`; the CLI and GUI clients read `client.cfg`.
+The project root includes a starter `server.cfg` on UDP port 52230. To
+try the example pair instead, use the examples directory as the working
+directory on both sides:
+
 ```sh
-bin/xtun keygen examples/peer.key
-bin/xtun client examples/client.cfg --check
-bin/xtun server examples/server.cfg --check
+cd examples
+../bin/xtun keygen peer.key
+../bin/xtun client --check
+../bin/xtun server --check
 ```
 
 `keygen` exclusively creates a new file; it never overwrites an existing key
@@ -89,11 +108,29 @@ between CIDRs. XTun uses the core CFG reader, which also checks same-name
 environment variables for settings omitted from the file. Convert existing
 Lua tables to CFG before starting the new binary.
 
+A client CFG can contain several connections. List the tags in order as
+`tags=work,personal` and prefix each connection's fields with its tag
+and a dot, for example `work.endpoint=192.0.2.2`. A tag is case-sensitive
+and contains up to 31 ASCII letters, digits, underscores or hyphens,
+with no leading hyphen. An optional `work.label` is the name shown in the
+GUI. Save Unicode labels as UTF-8 without a BOM.
+
+Save the tagged configuration as `client.cfg` in your working directory:
+
+```sh
+../bin/xtun client --tag work --check
+../bin/xtun client --tag work
+```
+
+When the file lists multiple tags, choose one with `--tag`. A file with one
+tag uses that tag by default. An untagged client CFG is still supported by
+the CLI. Server CFG files remain untagged.
+
 Start the server first, then the client, from an elevated/root terminal:
 
 ```sh
-bin/xtun server examples/server.cfg
-bin/xtun client examples/client.cfg
+../bin/xtun server
+../bin/xtun client
 ```
 
 After `READY`, ping the peer tunnel IP. In split mode, only configured routes

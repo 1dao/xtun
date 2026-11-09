@@ -11,7 +11,7 @@ def main():
     with tempfile.TemporaryDirectory(dir=ROOT/"build",prefix="config-") as folder:
         folder=Path(folder)
         key=folder/"peer.key"
-        def call(*args):return subprocess.run([str(BIN),*map(str,args)],text=True,capture_output=True)
+        def call(*args):return subprocess.run([str(BIN),*map(str,args)],cwd=folder,text=True,capture_output=True)
         assert call("keygen",key).returncode==0
         original=key.read_bytes()
         assert len(original)==64
@@ -23,9 +23,9 @@ def main():
                 if isinstance(value,list): return ", ".join(value)
                 if isinstance(value,bool): return str(value).lower()
                 return str(value)
-            path=folder/"config.cfg"
+            path=folder/f"{mode}.cfg"
             path.write_text("".join(f"{k}={encode(v)}\n" for k,v in config.items()))
-            result=call(mode,path,"--check")
+            result=call(mode,"--check")
             assert (result.returncode==0)==expected,(changes,result.stdout,result.stderr)
             assert original.decode() not in result.stdout+result.stderr
         check({},True)
@@ -52,8 +52,27 @@ def main():
         check({"full_tunnel":True},False,"server")
         check({"full_tunnel":"sometimes"},False)
         check({"dns":"1.1.1.1"},False)
+        path = folder / "client.cfg"
+        work = "".join(f"work.{k}={v}\n" for k, v in base.items())
+        personal = "".join(f"personal.{k}={v}\n" for k, v in
+                           (base | {"endpoint":"203.0.113.1", "psk_file":"missing.key"}).items())
+        path.write_text("tags=work, personal\n" + work + personal)
+        assert call("client", "--tag", "work", "--check").returncode == 0
+        assert call("client", "--tag", "personal", "--check").returncode != 0
+        assert call("client", "--tag", "unknown", "--check").returncode != 0
+        assert call("client", "--check").returncode != 0
+        assert call("client", path, "--tag", "work", "--check").returncode != 0
+        (folder / "server.cfg").write_bytes(path.read_bytes())
+        assert call("server", "--check").returncode != 0
+        path.write_text("tags=work\n" + work)
+        assert call("client", "--check").returncode == 0
+        path.write_text("tags=work,work\n" + work)
+        assert call("client", "--tag", "work", "--check").returncode != 0
+        # Untagged fields must never fill missing fields in the selected block.
+        path.write_text("tags=work\nidentity=test-peer\n" + work.replace("work.identity=test-peer\n", ""))
+        assert call("client", "--tag", "work", "--check").returncode != 0
         key.write_text("not-a-secret-key")
         check({},False)
-        print("PASS CLI/configuration validation, split-route guards, relative keys and exclusive key creation")
+        print("PASS CLI/configuration validation, tag isolation, split-route guards, and key handling")
 
 if __name__=="__main__":main()

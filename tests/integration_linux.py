@@ -31,7 +31,8 @@ def main():
     def spawn(name, args, filename):
         log = open(directory / filename, "w+")
         logs.append(log)
-        p = subprocess.Popen(["ip", "netns", "exec", name, *map(str, args)], stdout=log, stderr=subprocess.STDOUT)
+        p = subprocess.Popen(["ip", "netns", "exec", name, *map(str, args)],
+                             cwd=directory, stdout=log, stderr=subprocess.STDOUT)
         processes.append(p)
         return p, log
     def contents(log):
@@ -64,8 +65,8 @@ def main():
                bind="192.0.2.1", endpoint="192.0.2.2", port=PORT, name="xtun0", routes=["198.19.0.0/24"])
         ns(server,"sysctl","-q","-w","net.ipv4.ip_forward=1")
         ns(server,"nft","-f","-",input="table ip xtun_test {\nchain postrouting {\ntype nat hook postrouting priority srcnat;\nip saddr 10.77.0.2 ip daddr 198.19.0.0/24 masquerade\n}\n}\n")
-        sp, sl = spawn(server,[BIN,"server",directory/"server.cfg"],"server.log")
-        cp, cl = spawn(client,[BIN,"client",directory/"client.cfg"],"client.log")
+        sp, sl = spawn(server,[BIN,"server"],"server.log")
+        cp, cl = spawn(client,[BIN,"client"],"client.log")
         deadline = time.monotonic()+15
         while "READY " not in contents(sl) or "READY " not in contents(cl):
             if time.monotonic()>deadline or sp.poll() is not None or cp.poll() is not None:

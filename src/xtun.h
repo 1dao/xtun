@@ -6,6 +6,8 @@
 #define XT_MTU 1280
 #define XT_MAX_ROUTES 16
 #define XT_HEADER 8
+#define XT_CLIENT_CONFIG "client.cfg"
+#define XT_SERVER_CONFIG "server.cfg"
 typedef struct { uint32_t network, mask; unsigned prefix; } XtRoute;
 typedef struct {
     int server, check, probe, full_tunnel, managed;
@@ -30,6 +32,7 @@ int xt_device_routes(XtDevice *, const XtConfig *, char error[256]);
 void xt_device_close(XtDevice *);
 uint64_t xt_device_drops(XtDevice *);
 int xt_parse_ip(const char *, uint32_t *);
+int xt_load_config(XtConfig *, const char *, const char *tag);
 int xt_parse_route(const char *, XtRoute *);
 int xt_allowed(const XtConfig *, uint32_t);
 int xt_packet_valid(const XtConfig *, const void *, size_t, int inbound);
