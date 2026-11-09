@@ -15,7 +15,7 @@ LDLIBS += -lpthread -lm
 endif
 MBED_SRCS := $(wildcard $(XNET_ROOT)/3rd/mbedtls3/library/*.c)
 MBED_OBJS := $(patsubst $(XNET_ROOT)/3rd/mbedtls3/library/%.c,$(BUILD)/mbed/%.o,$(MBED_SRCS))
-CORE_NAMES := xudp xpoll xsock xlog
+CORE_NAMES := xargs xudp xpoll xsock xlog
 CORE_OBJS := $(addprefix $(BUILD)/core/,$(addsuffix .o,$(CORE_NAMES)))
 APP_OBJS := $(addprefix $(BUILD)/app/,$(addsuffix .o,main tunnel platform xdtls))
 TEST_APP_OBJS := $(filter-out $(BUILD)/app/main.o,$(APP_OBJS))

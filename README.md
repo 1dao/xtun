@@ -1,7 +1,7 @@
 # XTun
 
 XTun is an experimental encrypted IPv4 tunnel built on xnet2lua. Packet
-processing is implemented in C, with trusted local Lua configuration. Windows
+processing is implemented in C, with plain-text CFG configuration. Windows
 uses Wintun and Linux uses TUN. XTun uses its own protocol over DTLS; it does
 not interoperate with WireGuard.
 
@@ -32,8 +32,8 @@ make test
 ```
 
 On Windows use MinGW-w64 GCC and `mingw32-make`. On Linux use GCC and GNU Make.
-The bundled Lua runtime and mbedTLS are compiled from `core/`; no system Lua or
-TLS library is needed. The output is `bin/xtun.exe` or `bin/xtun`.
+The CFG reader and mbedTLS are compiled from `core/`; no Lua runtime or
+system TLS library is needed. The output is `bin/xtun.exe` or `bin/xtun`.
 The DTLS wrapper is owned by XTun in `src/xdtls.c` and `src/xdtls.h`;
 `core/` supplies the unchanged xnet2lua networking and third-party libraries.
 `XNET_ROOT=/path/to/xnet2lua` can select a different core checkout.
@@ -62,7 +62,7 @@ The default dependency paths point to sibling checkouts under `../../ops`.
 `xtun.exe`, `wintun.dll` and the third-party notices together when distributing
 the build. The GUI needs no Lua script or raygui DLL at runtime.
 
-Launch `bin/xtun-gui.exe` as administrator, choose the same client `.lua`
+Launch `bin/xtun-gui.exe` as administrator, choose the same client `.cfg`
 configuration used by the CLI, and click **Connect**. The window shows
 connection state and recent client logs. Disconnecting or closing the window
 asks the client process to exit normally so it can remove its network resources.
@@ -71,27 +71,29 @@ asks the client process to exit normally so it can remove its network resources.
 
 ```sh
 bin/xtun keygen examples/peer.key
-bin/xtun client examples/client.lua --check
-bin/xtun server examples/server.lua --check
+bin/xtun client examples/client.cfg --check
+bin/xtun server examples/server.cfg --check
 ```
 
 `keygen` exclusively creates a new file; it never overwrites an existing key
 or prints the secret. Linux files are created with mode 0600. Windows key
 files have a protected ACL for owner rights, administrators and SYSTEM.
 Transfer the same PSK securely to the other host. Do not share one PSK among
-different clients. Relative `psk_file` paths resolve relative to the Lua file.
+different clients. Relative `psk_file` paths resolve relative to the CFG file.
 Keep real keys and configurations out of Git.
 
-Edit `examples/client.lua` to set the server's reachable IPv4 address. The
+Edit `examples/client.cfg` to set the server's reachable IPv4 address. The
 example addresses are documentation/test networks. Configure the matching
-addresses, identity and key on both hosts. Configuration files execute as
-local Lua code; only load files you trust.
+addresses, identity and key on both hosts. Use one unquoted `key=value` per line, with `#` for comments and commas
+between CIDRs. XTun uses the core CFG reader, which also checks same-name
+environment variables for settings omitted from the file. Convert existing
+Lua tables to CFG before starting the new binary.
 
 Start the server first, then the client, from an elevated/root terminal:
 
 ```sh
-bin/xtun server examples/server.lua
-bin/xtun client examples/client.lua
+bin/xtun server examples/server.cfg
+bin/xtun client examples/client.cfg
 ```
 
 After `READY`, ping the peer tunnel IP. In split mode, only configured routes
@@ -112,9 +114,9 @@ Forwarding/NAT are explicit system administration operations. The supplied
 Linux integration test demonstrates them inside isolated namespaces; the app
 does not modify host firewall rules or enable host-wide forwarding.
 
-For IPv4 full tunneling, set `full_tunnel = true` on the Windows client and
+For IPv4 full tunneling, set `full_tunnel=true` on the Windows client and
 omit `routes`. Keep `bind` unset or set to `0.0.0.0`. On the Linux server
-set `local_networks = { "0.0.0.0/0" }` to authorize forwarding to arbitrary
+set `local_networks=0.0.0.0/0` to authorize forwarding to arbitrary
 IPv4 destinations and receiving their replies. Configure Linux IP forwarding
 and NAT (or return routing) separately. The server still authorizes the
 client's tunnel source address through `routes` and the automatic peer /32.
@@ -122,7 +124,7 @@ client's tunnel source address through `routes` and the automatic peer /32.
 After peer authentication, the client preserves an IPv4 /32 route for the
 server endpoint on its original interface, then installs two /1 routes on
 Wintun. Existing more-specific routes, including local subnets, can still
-take precedence. Optional `dns = "1.1.1.1"` sets one IPv4 DNS server on
+take precedence. Optional `dns=1.1.1.1` sets one IPv4 DNS server on
 the Wintun adapter (Windows 10 build 19041 or later). Choose a DNS address
 routed through Wintun. The adapter and its DNS settings are removed on normal
 exit, and startup failures roll back routes created by XTun. IPv6 and

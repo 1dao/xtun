@@ -24,7 +24,7 @@ int ui_admin(void) {
 int ui_choose_config(char *path, size_t size) {
     OPENFILENAMEA picker = {0};
     picker.lStructSize = sizeof(picker);
-    picker.lpstrFilter = "XTun configuration (*.lua)\0*.lua\0All files\0*.*\0";
+    picker.lpstrFilter = "XTun configuration (*.cfg)\0*.cfg\0All files\0*.*\0";
     picker.lpstrFile = path;
     picker.nMaxFile = (DWORD)size;
     picker.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;

@@ -18,16 +18,19 @@ def main():
         assert call("keygen",key).returncode!=0 and key.read_bytes()==original
         base=dict(endpoint="192.0.2.2",identity="test-peer",psk_file="peer.key",address="10.77.0.2",peer_address="10.77.0.1")
         def check(changes,expected,mode="client"):
-            import json
             config=base|changes
-            def encode(value):return "{"+",".join(map(json.dumps,value))+"}" if isinstance(value,list) else json.dumps(value)
-            path=folder/"config.lua"
-            path.write_text("return {"+",".join(k+"="+encode(v) for k,v in config.items())+"}")
+            def encode(value):
+                if isinstance(value,list): return ", ".join(value)
+                if isinstance(value,bool): return str(value).lower()
+                return str(value)
+            path=folder/"config.cfg"
+            path.write_text("".join(f"{k}={encode(v)}\n" for k,v in config.items()))
             result=call(mode,path,"--check")
             assert (result.returncode==0)==expected,(changes,result.stdout,result.stderr)
             assert original.decode() not in result.stdout+result.stderr
         check({},True)
-        check({"routes":["198.19.0.0/24"]},True)
+        check({"routes":["198.19.0.0/24", "203.0.113.0/24"]},True)
+        check({"routes":"198.19.0.0/24,"},False)
         check({"routes":["0.0.0.0/0"]},False)
         check({"routes":["192.0.2.0/24"]},False)
         check({"routes":["10.77.0.0/24"]},False)
@@ -47,7 +50,7 @@ def main():
         check({"full_tunnel":True,"routes":["198.19.0.0/24"]},False)
         check({"full_tunnel":True,"bind":"192.0.2.3"},False)
         check({"full_tunnel":True},False,"server")
-        check({"full_tunnel":"true"},False)
+        check({"full_tunnel":"sometimes"},False)
         check({"dns":"1.1.1.1"},False)
         key.write_text("not-a-secret-key")
         check({},False)

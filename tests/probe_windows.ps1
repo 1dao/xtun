@@ -9,24 +9,22 @@ $linuxAddresses = (& wsl -d archlinux --exec ip -j -4 address show dev eth0) | C
 $linuxIp = $linuxAddresses[0].addr_info[0].local
 & $exe keygen (Join-Path $testDir 'peer.key')
 if ($LASTEXITCODE -ne 0) { throw 'key generation failed' }
-$serverConfig = @'
-return {bind="0.0.0.0",port=51216,identity="probe",psk_file="peer.key",address="10.77.0.1",peer_address="10.77.0.2",run_seconds=10}
-'@
-$clientConfig = 'return {endpoint="' + $linuxIp + '",port=51216,identity="probe",psk_file="peer.key",address="10.77.0.2",peer_address="10.77.0.1",run_seconds=8}'
-[IO.File]::WriteAllText((Join-Path $testDir 'server.lua'), $serverConfig)
-[IO.File]::WriteAllText((Join-Path $testDir 'client.lua'), $clientConfig)
+$serverConfig = "bind=0.0.0.0`nport=51216`nidentity=probe`npsk_file=peer.key`naddress=10.77.0.1`npeer_address=10.77.0.2`nrun_seconds=10"
+$clientConfig = "endpoint=$linuxIp`nport=51216`nidentity=probe`npsk_file=peer.key`naddress=10.77.0.2`npeer_address=10.77.0.1`nrun_seconds=8"
+[IO.File]::WriteAllText((Join-Path $testDir 'server.cfg'), $serverConfig)
+[IO.File]::WriteAllText((Join-Path $testDir 'client.cfg'), $clientConfig)
 $start = [Diagnostics.ProcessStartInfo]::new('wsl.exe')
 $start.UseShellExecute = $false
 $start.CreateNoWindow = $true
 $start.RedirectStandardOutput = $true
 $start.RedirectStandardError = $true
-foreach ($arg in @('-d','archlinux','--',($linuxRoot + '/bin/xtun'),'server',($linuxDir + '/server.lua'),'--probe')) { $start.ArgumentList.Add($arg) }
+foreach ($arg in @('-d','archlinux','--',($linuxRoot + '/bin/xtun'),'server',($linuxDir + '/server.cfg'),'--probe')) { $start.ArgumentList.Add($arg) }
 $server = [Diagnostics.Process]::Start($start)
 $serverOut = $server.StandardOutput.ReadToEndAsync()
 $serverErr = $server.StandardError.ReadToEndAsync()
 try {
     Start-Sleep -Milliseconds 500
-    & $exe client (Join-Path $testDir 'client.lua') --probe
+    & $exe client (Join-Path $testDir 'client.cfg') --probe
     if ($LASTEXITCODE -ne 0) { throw 'Windows-to-Linux probe failed' }
     if (-not $server.WaitForExit(15000)) { throw 'Linux probe server did not exit' }
     $serverOut.Result
