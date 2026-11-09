@@ -4,3 +4,4 @@
 *.key
 *.log
 /wintun.dll
+__pycache__/

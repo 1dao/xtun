@@ -25,6 +25,7 @@ xDtls *xdtls_create(const xDtlsConfig *, char error[256]);
 void xdtls_destroy(xDtls *);
 int xdtls_feed(xDtls *, const void *, size_t); /* copies one complete datagram */
 int xdtls_step(xDtls *, uint64_t now_ms); /* 1 ready, 0 pending, -2 fatal */
+/* Read returns AGAIN while an application write retry is pending. */
 int xdtls_read(xDtls *, void *, size_t);
 /* On AGAIN, retry with identical bytes/length before submitting other data. */
 int xdtls_write(xDtls *, const void *, size_t);

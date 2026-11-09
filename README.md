@@ -121,6 +121,40 @@ pwsh -File tests/probe_windows.ps1
 This tests Windows-to-Linux secure UDP without creating a Windows adapter.
 It is separate from a real, elevated Wintun acceptance test.
 
+For a sustained test after the real tunnel is running, `tests/soak.py` provides
+a Linux transfer service and a Windows client monitor. Use a dedicated test
+directory on each host:
+
+```sh
+python3 tests/soak.py serve --work /path/to/test-directory --pid SERVER_XTUN_PID
+```
+
+```powershell
+python tests/soak.py client --attach-pid CLIENT_XTUN_PID --work build/soak --seconds 1800
+```
+
+The service binds only the tunnel address (default `10.77.0.1`), using TCP 9001
+and UDP 9002. It repeatedly transfers 64 MiB files in both directions and
+checks SHA-256 after each complete file. Independent 1000-byte UDP echo probes
+measure round-trip delay and five-second non-return counts. CPU and RSS are
+sampled every five seconds; CPU percentages use one logical CPU = 100%.
+Results are written as JSON/JSONL in the client test directory. A partial file
+at the time limit is not counted as a complete, verified transfer.
+UDP event logs separate send/receive errors, five-second timeouts, late echoes,
+duplicates and unknown IDs. `integrity_passed` reports file correctness;
+`status=completed` does not assert an acceptable UDP loss or throughput level.
+Record concurrent traffic (for example SSH proxy video playback) separately;
+shared-link results are not an isolated tunnel bandwidth benchmark.
+On exit, `STATS` separates DTLS input overflow, transmit queue, peer/frame/IP
+validation, adapter write and device drops. `UDP_STATS` reports socket-level
+oversize/errors and send backpressure separately; neither includes kernel or
+WAN drops that occur before the application receives a datagram.
+
+Attach mode leaves the existing client running. The operator must stop that
+client normally, stop the server/test services, and remove test data and
+temporary network resources after collecting results. UDP non-return includes
+either direction and application queues; it is not one-way WAN packet loss.
+
 ## Protocol and operational limits
 
 DTLS authenticates and encrypts the complete application message. Its record

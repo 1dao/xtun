@@ -52,6 +52,7 @@ typedef struct {
     XtDevice *dev;
     uint64_t now, born, last_rx, last_tx, last_ready, last_ping, records;
     uint64_t tx_packets, rx_packets, drops, tx_bytes, rx_bytes;
+    uint64_t drop_peer, drop_dtls_input, drop_tx_queue, drop_frame, drop_ip, drop_tun_write;
     unsigned head, count;
     struct { size_t len; unsigned char bytes[XT_HEADER + XT_MTU]; } queue[XT_QUEUE];
     int active, routes, failed, probe_ok, pong;
@@ -80,11 +81,11 @@ static void udp_receive(xUdp *u, const char *data, size_t n, const xUdpAddress *
         if (!t->cfg->server || n < 13 || (unsigned char)data[0] != 22 ||
             (unsigned char)data[1] != 0xfe || ((unsigned char)data[2] != 0xff && (unsigned char)data[2] != 0xfd)) return;
         t->peer = *from;
-        if (xt_allowed(t->cfg, ntohl(inet_addr(from->ip)))) { ++t->drops; return; }
+        if (xt_allowed(t->cfg, ntohl(inet_addr(from->ip)))) { ++t->drops; ++t->drop_peer; return; }
         if (!new_session(t)) { t->failed = 1; return; }
     }
-    if (from->port != t->peer.port || strcmp(from->ip, t->peer.ip)) { ++t->drops; return; }
-    if (xdtls_feed(t->dtls, data, n)) ++t->drops;
+    if (from->port != t->peer.port || strcmp(from->ip, t->peer.ip)) { ++t->drops; ++t->drop_peer; return; }
+    if (xdtls_feed(t->dtls, data, n)) { ++t->drops; ++t->drop_dtls_input; }
 }
 static void udp_error(xUdp *u, int error, bool fatal, void *p) {
     (void)u;
@@ -92,7 +93,7 @@ static void udp_error(xUdp *u, int error, bool fatal, void *p) {
 }
 static int enqueue(Tunnel *t, unsigned type, const void *data, size_t n) {
     /* Reserve four slots for control. All buffers have fixed byte bounds. */
-    if (n > XT_MTU || t->count >= (type == DATA ? XT_QUEUE-4 : XT_QUEUE)) { ++t->drops; return 0; }
+    if (n > XT_MTU || t->count >= (type == DATA ? XT_QUEUE-4 : XT_QUEUE)) { ++t->drops; ++t->drop_tx_queue; return 0; }
     unsigned tail = (t->head + t->count) % XT_QUEUE;
     unsigned char *p = t->queue[tail].bytes;
     p[0] = 1; p[1] = (unsigned char)type; p[2] = p[3] = 0; put32(p+4, (uint32_t)n);
@@ -123,7 +124,7 @@ static int receive_messages(Tunnel *t) {
         if (rc == XDTLS_AGAIN) return 1;
         if (rc < XT_HEADER || p[0] != 1 || p[2] || p[3] || be32(p+4) != (unsigned)rc-XT_HEADER) {
             if (rc < 0) return 0;
-            ++t->drops; continue;
+            ++t->drops; ++t->drop_frame; continue;
         }
         size_t n = (size_t)rc-XT_HEADER;
         if (p[1] == READY) {
@@ -142,17 +143,18 @@ static int receive_messages(Tunnel *t) {
                 t->active = 1;
                 printf("READY %s mtu=%d\n", xdtls_suite(t->dtls), XT_MTU); fflush(stdout);
             }
-        } else if (p[1] == DATA && t->active && !t->cfg->probe && xt_packet_valid(t->cfg, p+8, n, 1)) {
+        } else if (p[1] == DATA && t->active && !t->cfg->probe) {
+            if (!xt_packet_valid(t->cfg, p+8, n, 1)) { ++t->drops; ++t->drop_ip; continue; }
             t->last_rx = t->now;
             if (xt_device_write(t->dev, p+8, n) > 0) { ++t->rx_packets; t->rx_bytes += n; }
-            else ++t->drops;
+            else { ++t->drops; ++t->drop_tun_write; }
         } else if (p[1] == PING && t->active && n == 8) {
             t->last_rx = t->now; enqueue(t, PONG, p+8, n);
         } else if (p[1] == PONG && t->active && n == 8) {
             t->last_rx = t->now; t->pong = 1;
             if (t->cfg->probe) { puts("PROBE OK: authenticated bidirectional datagrams"); fflush(stdout); t->probe_ok = 1; }
         } else if (p[1] == CLOSE && !n) return 0;
-        else ++t->drops;
+        else { ++t->drops; ++t->drop_frame; }
     }
     return 1;
 }
@@ -169,6 +171,8 @@ int xt_run(const XtConfig *cfg) {
     xt_install_signals();
     if (socket_init() || xpoll_init()) goto done;
     xUdpConfig udp_cfg = {0}; udp_cfg.max_datagram = XDTLS_MAX_RECORD;
+    /* Never drain more records per poll than an empty DTLS queue can hold. */
+    udp_cfg.recv_budget = XDTLS_RX_SLOTS;
     udp_cfg.on_datagram = udp_receive; udp_cfg.on_error = udp_error; udp_cfg.userdata = t;
     t->udp = xudp_bind(cfg->bind_ip, cfg->bind_port, &udp_cfg, error);
     if (!t->udp) { fprintf(stderr, "UDP bind: %s\n", error); goto done; }
@@ -204,7 +208,7 @@ int xt_run(const XtConfig *cfg) {
                             if (n < 0) { t->failed = 1; break; }
                             if (!n) break;
                             if (xt_packet_valid(cfg, packet, (size_t)n, 0)) enqueue(t, DATA, packet, (size_t)n);
-                            else ++t->drops;
+                            else { ++t->drops; ++t->drop_ip; }
                         }
                     }
                     if (!flush(t)) { reset(t); retry_at = t->now+1000; }
@@ -217,10 +221,23 @@ int xt_run(const XtConfig *cfg) {
     if (xt_stop) rc = 0;
     if (t->failed) rc = 1;
 done:
-    printf("STATS tx_packets=%llu rx_packets=%llu tx_bytes=%llu rx_bytes=%llu drops=%llu\n",
+    printf("STATS tx_packets=%llu rx_packets=%llu tx_bytes=%llu rx_bytes=%llu drops=%llu "
+        "drop_peer=%llu drop_dtls_input=%llu drop_tx_queue=%llu drop_frame=%llu "
+        "drop_ip=%llu drop_tun_write=%llu drop_device=%llu\n",
         (unsigned long long)t->tx_packets, (unsigned long long)t->rx_packets,
         (unsigned long long)t->tx_bytes, (unsigned long long)t->rx_bytes,
-        (unsigned long long)(t->drops + xt_device_drops(t->dev)));
+        (unsigned long long)(t->drops + xt_device_drops(t->dev)),
+        (unsigned long long)t->drop_peer, (unsigned long long)t->drop_dtls_input,
+        (unsigned long long)t->drop_tx_queue, (unsigned long long)t->drop_frame,
+        (unsigned long long)t->drop_ip, (unsigned long long)t->drop_tun_write,
+        (unsigned long long)xt_device_drops(t->dev));
+    xUdpStats udp_stats = {0};
+    if (t->udp) xudp_get_stats(t->udp, &udp_stats);
+    printf("UDP_STATS rx_datagrams=%llu tx_datagrams=%llu rx_oversize=%llu "
+        "receive_errors=%llu send_errors=%llu send_would_block=%llu\n",
+        (unsigned long long)udp_stats.datagrams_received, (unsigned long long)udp_stats.datagrams_sent,
+        (unsigned long long)udp_stats.dropped_oversize, (unsigned long long)udp_stats.receive_errors,
+        (unsigned long long)udp_stats.send_errors, (unsigned long long)udp_stats.send_would_block);
     if (xdtls_ready(t->dtls) && t->active && !t->count) {
         enqueue(t, CLOSE, NULL, 0); (void)flush(t);
     }

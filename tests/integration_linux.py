@@ -11,6 +11,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = Path(os.environ.get("XTUN_BIN", str(ROOT / "bin/xtun"))).resolve()
+PORT = int(os.environ.get("XTUN_TEST_PORT", "51215"))
 
 def run(*args, **kwargs):
     result = subprocess.run(args, text=True, capture_output=True, **kwargs)
@@ -61,9 +62,9 @@ def main():
                 entries.append(f"{key} = {encoded}")
             path.write_text("return {"+",\n".join(entries)+"}\n")
         config(directory/"server.lua", address="10.77.0.1", peer_address="10.77.0.2",
-               bind="192.0.2.2", port=51215, name="xtun0", local_networks=["198.19.0.0/24"])
+               bind="192.0.2.2", port=PORT, name="xtun0", local_networks=["198.19.0.0/24"])
         config(directory/"client.lua", address="10.77.0.2", peer_address="10.77.0.1",
-               bind="192.0.2.1", endpoint="192.0.2.2", port=51215, name="xtun0", routes=["198.19.0.0/24"])
+               bind="192.0.2.1", endpoint="192.0.2.2", port=PORT, name="xtun0", routes=["198.19.0.0/24"])
         ns(server,"sysctl","-q","-w","net.ipv4.ip_forward=1")
         ns(server,"nft","-f","-",input="table ip xtun_test {\nchain postrouting {\ntype nat hook postrouting priority srcnat;\nip saddr 10.77.0.2 ip daddr 198.19.0.0/24 masquerade\n}\n}\n")
         sp, sl = spawn(server,[BIN,"server",directory/"server.lua"],"server.log")
@@ -129,7 +130,13 @@ u.close()
             assert "10.77." not in ns(name,"ip","-4","route","show").stdout
         print("PASS normal shutdown removes owned routes and adapters",flush=True)
         for log in [sl,cl]:
-            print(contents(log).strip())
+            text=contents(log)
+            stats=next(line for line in text.splitlines() if line.startswith('STATS '))
+            counters={key:int(value) for key,value in (field.split('=') for field in stats.split()[1:])}
+            assert sum(value for key,value in counters.items() if key.startswith('drop_'))==counters['drops']
+            # IPv4-only adapters intentionally reject other host-generated IP
+            # traffic (such as IPv6 control packets); keep those counts visible.
+            print(text.strip())
         print("LINUX INTEGRATION PASSED",flush=True)
     finally:
         for p in processes:

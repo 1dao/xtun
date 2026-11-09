@@ -27,7 +27,7 @@ struct xDtls {
     unsigned head, count;
     uint64_t now, timer_start;
     uint32_t timer_intermediate, timer_final;
-    int server, ready, closed, error;
+    int server, ready, closed, error, write_pending;
 };
 
 static int fail(xDtls *d, int rc) { d->error = rc; d->closed = 1; return XDTLS_ERROR; }
@@ -156,6 +156,10 @@ int xdtls_step(xDtls *d, uint64_t now) {
 }
 int xdtls_read(xDtls *d, void *out, size_t n) {
     if (!d || !d->ready || d->closed) return XDTLS_ERROR;
+    /* DTLS ssl_read flushes output. Doing so between WANT_WRITE and the
+     * matching write retry would lose ssl_write's pending-record marker and
+     * encrypt/send the same application datagram again with a new sequence. */
+    if (d->write_pending) return XDTLS_AGAIN;
     int rc = mbedtls_ssl_read(&d->ssl, out, n);
     if (rc > 0) return rc;
     if (rc == MBEDTLS_ERR_SSL_WANT_READ || rc == MBEDTLS_ERR_SSL_WANT_WRITE) return XDTLS_AGAIN;
@@ -164,7 +168,8 @@ int xdtls_read(xDtls *d, void *out, size_t n) {
 int xdtls_write(xDtls *d, const void *bytes, size_t n) {
     if (!d || !d->ready || d->closed || !bytes || !n || n > xdtls_max_payload(d)) return XDTLS_ERROR;
     int rc = mbedtls_ssl_write(&d->ssl, bytes, n);
-    if (rc == MBEDTLS_ERR_SSL_WANT_READ || rc == MBEDTLS_ERR_SSL_WANT_WRITE) return XDTLS_AGAIN;
+    d->write_pending = rc == MBEDTLS_ERR_SSL_WANT_READ || rc == MBEDTLS_ERR_SSL_WANT_WRITE;
+    if (d->write_pending) return XDTLS_AGAIN;
     return rc > 0 ? rc : fail(d, rc);
 }
 int xdtls_ready(const xDtls *d) { return d && d->ready && !d->closed; }
