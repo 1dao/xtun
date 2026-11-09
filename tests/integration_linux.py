@@ -59,12 +59,21 @@ def main():
             entries = [f"{key}={','.join(value) if isinstance(value,list) else value}"
                        for key, value in values.items()]
             path.write_text("\n".join(entries)+"\n")
-        config(directory/"server.cfg", address="10.77.0.1", peer_address="10.77.0.2",
-               bind="192.0.2.2", port=PORT, name="xtun0", local_networks=["198.19.0.0/24"])
+        server_settings = dict(address="10.77.0.1", peer_address="10.77.0.2",
+                               bind="192.0.2.2", port=PORT, name="xtun0", local_networks=["198.19.0.0/24"])
+        config(directory/"server.cfg", **server_settings,
+               PostUp="touch hook-marker; false; touch hook-unexpected", PostDown="rm -f hook-marker; touch hook-cleaned")
+        failed, failed_log = spawn(server,[BIN,"server"],"failed-hook.log")
+        assert failed.wait(timeout=8) != 0 and "PostUp failed" in contents(failed_log)
+        assert (directory/"hook-cleaned").exists()
+        assert not (directory/"hook-marker").exists() and not (directory/"hook-unexpected").exists()
+        assert "xtun0" not in ns(server,"ip","-o","link","show").stdout
+        config(directory/"server.cfg", **server_settings,
+               PostUp="nft -f hook.nft", PostDown="nft delete table ip xtun_test")
         config(directory/"client.cfg", address="10.77.0.2", peer_address="10.77.0.1",
                bind="192.0.2.1", endpoint="192.0.2.2", port=PORT, name="xtun0", routes=["198.19.0.0/24"])
         ns(server,"sysctl","-q","-w","net.ipv4.ip_forward=1")
-        ns(server,"nft","-f","-",input="table ip xtun_test {\nchain postrouting {\ntype nat hook postrouting priority srcnat;\nip saddr 10.77.0.2 ip daddr 198.19.0.0/24 masquerade\n}\n}\n")
+        (directory/"hook.nft").write_text("table ip xtun_test {\nchain postrouting {\ntype nat hook postrouting priority srcnat;\nip saddr 10.77.0.2 ip daddr 198.19.0.0/24 masquerade\n}\n}\n")
         sp, sl = spawn(server,[BIN,"server"],"server.log")
         cp, cl = spawn(client,[BIN,"client"],"client.log")
         deadline = time.monotonic()+15
@@ -123,6 +132,7 @@ u.close()
         # Normal shutdown must remove the adapter and only this process's routes.
         for p in [cp,sp]: p.send_signal(signal.SIGTERM)
         for p in [cp,sp]: assert p.wait(timeout=8)==0
+        assert "xtun_test" not in ns(server,"nft","list","tables").stdout
         for name in [client,server]:
             assert "xtun0" not in ns(name,"ip","-o","link","show").stdout
             assert "10.77." not in ns(name,"ip","-4","route","show").stdout

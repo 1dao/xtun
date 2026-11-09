@@ -146,12 +146,25 @@ static void reset(Tunnel *t) {
     xdtls_close(t->dtls); xdtls_destroy(t->dtls); t->dtls = NULL;
     t->count = t->head = 0; t->active = t->pong = 0;
 }
+#ifndef _WIN32
+static int run_hook(const char *name, const char *command, int stop_on_error) {
+    if (!*command) return 1;
+    char script[2056];
+    snprintf(script, sizeof(script), "%s%s", stop_on_error ? "set -e\n" : "", command);
+    int status = system(script);
+    if (status != 0) fprintf(stderr, "%s failed (wait status %d)\n", name, status);
+    return status == 0;
+}
+#endif
 int xt_run(const XtConfig *cfg) {
     Tunnel *t = calloc(1, sizeof(*t));
     if (!t) return 1;
     t->cfg = cfg; t->now = xt_now();
     uint64_t start = t->now, retry_at = start;
     char error[256]; int rc = 1;
+#ifndef _WIN32
+    int hooks_started = 0;
+#endif
     xt_install_signals();
     if (socket_init() || xpoll_init()) goto done;
     xUdpConfig udp_cfg = {0}; udp_cfg.max_datagram = XDTLS_MAX_RECORD;
@@ -164,6 +177,12 @@ int xt_run(const XtConfig *cfg) {
     if (!cfg->probe) {
         t->dev = xt_device_open(cfg, error);
         if (!t->dev) { fprintf(stderr, "virtual adapter: %s\n", error); goto done; }
+#ifndef _WIN32
+        if (cfg->server) {
+            hooks_started = 1;
+            if (!run_hook("PostUp", cfg->post_up, 1)) goto done;
+        }
+#endif
     }
     xUdpAddress bound; xudp_sockname(t->udp, &bound);
     printf("LISTEN %s:%u mode=%s%s\n", bound.ip, bound.port, cfg->server ? "server" : "client", cfg->probe ? " probe" : ""); fflush(stdout);
@@ -231,6 +250,9 @@ done:
     if (xdtls_ready(t->dtls) && t->active && !t->count) {
         enqueue(t, CLOSE, NULL, 0); (void)flush(t);
     }
+#ifndef _WIN32
+    if (hooks_started && !run_hook("PostDown", cfg->post_down, 0)) rc = 1;
+#endif
     reset(t); xt_device_close(t->dev); xudp_destroy(t->udp); xpoll_uninit(); socket_cleanup();
     free(t); return rc;
 }

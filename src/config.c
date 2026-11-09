@@ -131,6 +131,16 @@ int xt_load_config(XtConfig *c, const char *path, const char *tag) {
         }
     }
     int ok = read_fields(c, tag);
+    const char *up = xt_cfg_value(tag, "PostUp"), *down = xt_cfg_value(tag, "PostDown");
+    if (up || down) {
+#ifdef _WIN32
+        ok = 0;
+#else
+        ok = ok && c->server &&
+             field_string(NULL, "PostUp", c->post_up, sizeof(c->post_up), "") &&
+             field_string(NULL, "PostDown", c->post_down, sizeof(c->post_down), "");
+#endif
+    }
     const char *psk = xt_cfg_value(tag, "psk");
     if (tag && !psk) psk = xargs_get("psk");
     char hex[65];

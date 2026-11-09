@@ -43,6 +43,9 @@ def main():
         check({"local_networks":["198.19.0.0/24"]},True,"server")
         check({"local_networks":["0.0.0.0/0"]},True,"server")
         windows = os.name == "nt"
+        check({"PostUp":"touch hook-ran; false","PostDown":"touch hook-ran"},not windows,"server")
+        check({"PostUp":"touch hook-ran"},False)
+        assert not (folder/"hook-ran").exists()
         check({"full_tunnel":True},windows)
         check({"full_tunnel":True,"dns":"1.1.1.1"},windows)
         check({"full_tunnel":True,"dns":"192.0.2.2"},False)

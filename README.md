@@ -149,9 +149,19 @@ are installed. Ctrl+C performs cleanup.
 - `session_seconds`: full-handshake renewal interval, 30..86400, default 3600.
 - `run_seconds`: optional bounded runtime, default 0 (until interrupted).
 
-Forwarding/NAT are explicit system administration operations. The supplied
-Linux integration test demonstrates them inside isolated namespaces; the app
-does not modify host firewall rules or enable host-wide forwarding.
+On Linux, optional server settings `PostUp` and `PostDown` run trusted shell
+commands with the server's privileges. `PostUp` runs after the TUN interface
+is configured and before the session loop. A failed `PostUp` aborts startup
+and attempts `PostDown`. On normal shutdown, `PostDown` runs before adapter
+removal. Use cleanup commands that can handle partial setup. `--check` and
+`--probe` do not run hooks. A forced kill cannot run cleanup.
+
+Use the commented, scoped iptables example in the root `server.cfg` or
+your own firewall rules. Hooks run through `/bin/sh`, and `PostUp` enables
+shell error checking. `PostDown` reports its shell exit status, so a cleanup
+script that tries several operations should return failure if any fail.
+IPv4 forwarding is still a system setting. The Linux integration test
+demonstrates these operations inside isolated network namespaces.
 
 For IPv4 full tunneling, set `full_tunnel=true` on the Windows client and
 omit `routes`. Keep `bind` unset or set to `0.0.0.0`. On the Linux server
