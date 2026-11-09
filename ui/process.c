@@ -21,21 +21,32 @@ int ui_admin(void) {
     }
     return admin;
 }
-int ui_font_path(char *path, size_t size) {
+int ui_font_path(char *path, size_t size, const char *font_name) {
     UINT length = GetWindowsDirectoryA(path, (UINT)size);
-    static const char font[] = "\\Fonts\\segoeui.ttf";
-    if (!length || length >= size || sizeof(font) > size - length) return 0;
-    memcpy(path + length, font, sizeof(font));
-    return 1;
+    if (!length || length >= size) return 0;
+    int written = snprintf(path + length, size - length, "\\Fonts\\%s", font_name);
+    return written > 0 && (size_t)written < size - length;
 }
-int ui_choose_config(char *path, size_t size) {
-    OPENFILENAMEA picker = {0};
+int ui_choose_config(char *path, size_t size, int chinese) {
+    WCHAR selected[MAX_PATH] = {0};
+    if (*path && !MultiByteToWideChar(CP_ACP, 0, path, -1, selected, MAX_PATH)) return 0;
+    OPENFILENAMEW picker = {0};
     picker.lStructSize = sizeof(picker);
-    picker.lpstrFilter = "XTun configuration (*.cfg)\0*.cfg\0All files\0*.*\0";
-    picker.lpstrFile = path;
-    picker.nMaxFile = (DWORD)size;
+    picker.lpstrFilter = chinese ? L"XTun 配置文件 (*.cfg)\0*.cfg\0所有文件\0*.*\0" :
+                                  L"XTun configuration (*.cfg)\0*.cfg\0All files\0*.*\0";
+    picker.lpstrTitle = chinese ? L"选择 XTun 客户端配置" : L"Choose XTun client configuration";
+    picker.lpstrFile = selected;
+    picker.nMaxFile = MAX_PATH;
     picker.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-    return GetOpenFileNameA(&picker);
+    if (!GetOpenFileNameW(&picker)) return CommDlgExtendedError() ? -1 : 0;
+    char converted[MAX_PATH];
+    BOOL substituted = FALSE;
+    int utf8 = GetACP() == CP_UTF8;
+    int bytes = WideCharToMultiByte(CP_ACP, utf8 ? 0 : WC_NO_BEST_FIT_CHARS, selected, -1,
+                                    converted, sizeof(converted), NULL, utf8 ? NULL : &substituted);
+    if (!bytes || substituted || (size_t)bytes > size) return -1;
+    memcpy(path, converted, (size_t)bytes);
+    return 1;
 }
 int ui_start(const char *path, unsigned long *error) {
     char exe[MAX_PATH], command[2 * MAX_PATH + 64];
