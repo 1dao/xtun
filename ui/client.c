@@ -215,6 +215,7 @@ static const char *mode(const ProfileInfo *info) {
 
 enum Action { NONE, EDIT, REMOVE, NEW_PROFILE, CONFIRM_REMOVE, CONNECT_PROFILE };
 enum Dialog { NO_DIALOG, REMOVE_DIALOG, ERROR_DIALOG };
+static int menu_profile = -1;
 
 static enum Action sidebar(int width, int height, int modal) {
     DrawRectangle(0, 0, width, height, (Color){244, 247, 248, 255});
@@ -232,7 +233,9 @@ static enum Action sidebar(int width, int height, int modal) {
     int base = GuiGetStyle(BUTTON, BASE_COLOR_NORMAL);
     GuiSetStyle(BUTTON, BORDER_COLOR_NORMAL, 0);
     GuiSetStyle(BUTTON, BASE_COLOR_NORMAL, 0);
+    if (menu_profile >= 0) GuiDisable();
     int add = GuiButton(plus, "");
+    if (menu_profile >= 0) GuiEnable();
     GuiSetStyle(BUTTON, BORDER_COLOR_NORMAL, border);
     GuiSetStyle(BUTTON, BASE_COLOR_NORMAL, base);
     DrawLineEx((Vector2){plus.x + 8, plus.y + 15}, (Vector2){plus.x + 22, plus.y + 15}, 2, teal);
@@ -242,23 +245,34 @@ static enum Action sidebar(int width, int height, int modal) {
     int last = profile_count > visible ? profile_count - visible : 0;
     Rectangle region = {12, 75, width - 24, visible * 63};
     Vector2 mouse = GetMousePosition();
-    if (!modal && CheckCollisionPointRec(mouse, region)) profile_scroll -= (int)GetMouseWheelMove();
+    if (!modal && menu_profile < 0 && CheckCollisionPointRec(mouse, region)) profile_scroll -= (int)GetMouseWheelMove();
     if (profile_scroll > last) profile_scroll = last;
     if (profile_scroll < 0) profile_scroll = 0;
     int end = profile_scroll + visible;
     if (end > profile_count) end = profile_count;
+    int open = menu_profile;
+    if (modal || open < profile_scroll || open >= end) open = menu_profile = -1;
     for (int i = profile_scroll; i < end; ++i) {
         int y = 75 + (i - profile_scroll) * 63;
         Rectangle row = {12, y, width - 26, 55};
         int hover = !modal && CheckCollisionPointRec(mouse, row);
-        if (hover && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) selected = i;
+        Rectangle dots = {width - 48, y + 12, 28, 30};
+        int dot_hover = CheckCollisionPointRec(mouse, dots);
+        if (hover && open < 0 && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+            if (dot_hover) menu_profile = i;
+            else selected = i;
+        }
         if (selected == i) {
             round_box(row, 0.18f, (Color){220, 239, 235, 255});
             DrawRectangle(12, y + 8, 3, 39, teal);
         } else if (hover) round_box(row, 0.18f, (Color){232, 239, 240, 255});
-        if (i == active) DrawCircle(width - 28, y + 19, 4, state == CONNECTED ? active_color : teal);
-        clipped_caption(profiles[i].name, 24, y + 8, width - 57, 19, ink);
-        clipped_caption(i == active ? text[state] : mode(&details[i]), 24, y + 32, width - 56, 15, muted);
+        if (i == active) DrawCircle(width - 57, y + 19, 4, state == CONNECTED ? active_color : teal);
+        clipped_caption(profiles[i].name, 24, y + 8, width - 89, 19, ink);
+        clipped_caption(i == active ? text[state] : mode(&details[i]), 24, y + 32, width - 75, 15, muted);
+        if ((hover && dot_hover) || menu_profile == i)
+            round_box(dots, 0.24f, (Color){203, 226, 221, 255});
+        for (int dot = 0; dot < 3; ++dot)
+            DrawCircle(width - 34, y + 21 + 6 * dot, 1.6f, muted);
     }
     if (last > 0) {
         int track = visible * 63 - 8;
@@ -267,6 +281,25 @@ static enum Action sidebar(int width, int height, int modal) {
         DrawRectangle(width - 8, 75 + (track - thumb) * profile_scroll / last, 3, thumb, rule);
     }
     caption(text[TXT_ONE], 20, height - 27, 15, muted);
+    if (open >= 0) {
+        int y = 75 + (open - profile_scroll) * 63 + 44;
+        if (y + 70 > height) y -= 102;
+        Rectangle popup = {width - 132, y, 112, 70};
+        DrawRectangleRec(popup, WHITE);
+        DrawRectangleLinesEx(popup, 1, rule);
+        if (active >= 0) GuiDisable();
+        int edit = GuiButton((Rectangle){popup.x + 4, popup.y + 4, 104, 29}, text[TXT_EDIT]);
+        int remove = GuiButton((Rectangle){popup.x + 4, popup.y + 37, 104, 29}, text[TXT_REMOVE]);
+        GuiEnable();
+        if (edit || remove) {
+            selected = open;
+            menu_profile = -1;
+            return edit ? EDIT : REMOVE;
+        }
+        if (IsKeyPressed(KEY_ESCAPE) ||
+            (IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(mouse, popup)))
+            menu_profile = -1;
+    }
     return add ? NEW_PROFILE : NONE;
 }
 
@@ -279,13 +312,9 @@ static enum Action workspace(int left, int width, int height, int admin, int loc
         return NONE;
     }
     const ProfileInfo *info = &details[selected];
-    clipped_caption(profiles[selected].name, x, 22, w - 172, 31, ink);
+    clipped_caption(profiles[selected].name, x, 22, w, 31, ink);
     caption(text[TXT_SUBTITLE], x, 60, 16, muted);
     enum Action action = NONE;
-    if (locked || active >= 0) GuiDisable();
-    if (GuiButton((Rectangle){x + w - 152, 27, 72, 30}, text[TXT_EDIT])) action = EDIT;
-    if (GuiButton((Rectangle){x + w - 72, 27, 72, 30}, text[TXT_REMOVE])) action = REMOVE;
-    GuiEnable();
 
     enum ConnectionState visible_state = active == selected ? state :
         (active < 0 && selected == failed ? CLIENT_ERROR : DISCONNECTED);
@@ -402,8 +431,10 @@ int main(int argc, char **argv) {
         ClearBackground(RAYWHITE);
         int modal = dialog != NO_DIALOG || closing;
         if (modal) GuiLock();
+        int menu_open = menu_profile >= 0;
         enum Action action = sidebar(split, h - 33, modal);
-        enum Action main_action = workspace(split, w, h, admin, modal, &log_open);
+        if (menu_open || menu_profile >= 0) GuiLock();
+        enum Action main_action = workspace(split, w, h, admin, modal || menu_open, &log_open);
         if (main_action != NONE) action = main_action;
         DrawRectangle(0, h - 33, w, 33, (Color){242, 246, 247, 255});
         DrawLine(0, h - 33, w, h - 33, rule);
