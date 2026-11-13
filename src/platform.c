@@ -373,6 +373,7 @@ int xt_device_read(XtDevice *d, void *out, size_t cap) {
     return (int)n;
 }
 int xt_device_write(XtDevice *d, const void *bytes, size_t n) { return (int)write(d->fd, bytes, n); }
+int xt_device_fd(const XtDevice *d) { return d->fd; }
 XtDeviceStats xt_device_stats(XtDevice *d) { (void)d; return (XtDeviceStats){0}; }
 void xt_device_close(XtDevice *d) {
     if (!d) return;

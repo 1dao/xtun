@@ -7,6 +7,7 @@
 #include <string.h>
 #include <time.h>
 #define XT_QUEUE 64
+#define XT_READ_BUDGET 32
 enum { READY = 1, DATA, PING, PONG, CLOSE };
 volatile sig_atomic_t xt_stop;
 
@@ -189,7 +190,7 @@ int xt_run(const XtConfig *cfg) {
     uint64_t next_stats = start + stats_period;
     char error[256]; int rc = 1;
 #ifndef _WIN32
-    int hooks_started = 0;
+    int hooks_started = 0, tun_watched = 0;
 #endif
     xt_install_signals();
     if (socket_init() || xpoll_init()) goto done;
@@ -213,6 +214,7 @@ int xt_run(const XtConfig *cfg) {
     xUdpAddress bound; xudp_sockname(t->udp, &bound);
     printf("LISTEN %s:%u mode=%s%s\n", bound.ip, bound.port, cfg->server ? "server" : "client", cfg->probe ? " probe" : ""); fflush(stdout);
     while (!xt_stop && !t->failed) {
+        unsigned packets_read = 0;
 #ifdef _WIN32
         if (cfg->managed && !PeekNamedPipe(GetStdHandle(STD_INPUT_HANDLE), NULL, 0, NULL, NULL, NULL)) {
             xt_stop = 1;
@@ -238,10 +240,11 @@ int xt_run(const XtConfig *cfg) {
                     }
                     if (t->active && !cfg->probe) {
                         unsigned char packet[65536];
-                        for (unsigned i = 0; i < 32 && t->count < XT_QUEUE-4; ++i) {
+                        while (packets_read < XT_READ_BUDGET && t->count < XT_QUEUE-4) {
                             int n = xt_device_read(t->dev, packet, sizeof(packet));
                             if (n < 0) { t->failed = 1; break; }
                             if (!n) break;
+                            ++packets_read;
                             if (xt_packet_valid(cfg, packet, (size_t)n, 0)) enqueue(t, DATA, packet, (size_t)n);
                             else { ++t->drops; ++t->drop_ip; }
                         }
@@ -255,7 +258,23 @@ int xt_run(const XtConfig *cfg) {
             next_stats = t->now + stats_period;
         }
         if (cfg->probe && !cfg->server && t->probe_ok) { rc = 0; break; }
-        xpoll_poll(5);
+        int can_read_tun = t->dev && t->active && t->count < XT_QUEUE-4;
+#ifndef _WIN32
+        /* Read TUN in the main loop. epoll only needs to wake it, and
+         * watching a readable TUN while backpressured would spin. */
+        if (can_read_tun && !tun_watched) {
+            if (xpoll_add_event(xt_device_fd(t->dev), XPOLL_READABLE, NULL, NULL, NULL, NULL)) {
+                fputs("cannot watch TUN readiness\n", stderr);
+                t->failed = 1;
+                break;
+            }
+            tun_watched = 1;
+        } else if (!can_read_tun && tun_watched) {
+            xpoll_del_event(xt_device_fd(t->dev), XPOLL_READABLE);
+            tun_watched = 0;
+        }
+#endif
+        xpoll_poll(can_read_tun && packets_read == XT_READ_BUDGET ? 0 : 5);
     }
     if (xt_stop) rc = 0;
     if (t->failed) rc = 1;
@@ -284,6 +303,7 @@ done:
         enqueue(t, CLOSE, NULL, 0); (void)flush(t);
     }
 #ifndef _WIN32
+    if (tun_watched) xpoll_del_event(xt_device_fd(t->dev), XPOLL_READABLE);
     if (hooks_started && !run_hook("PostDown", cfg->post_down, 0)) rc = 1;
 #endif
     reset(t); xt_device_close(t->dev); xudp_destroy(t->udp); xpoll_uninit(); socket_cleanup();
