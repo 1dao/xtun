@@ -8,6 +8,7 @@
 #include <netioapi.h>
 #include <bcrypt.h>
 #include <sddl.h>
+#include <mmsystem.h>
 
 struct XtDevice {
     HMODULE dll;
@@ -32,7 +33,17 @@ struct XtDevice {
     unsigned head, count;
     struct { DWORD n; BYTE bytes[XT_MTU]; } queue[64];
 };
-uint64_t xt_now(void) { return GetTickCount64(); }
+/* GetTickCount64 quantizes to the 15.6ms system tick; timeBeginPeriod does not refine it. */
+uint64_t xt_now(void) {
+    static LARGE_INTEGER frequency;
+    LARGE_INTEGER counter;
+    if (!frequency.QuadPart) QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&counter);
+    return (uint64_t)(counter.QuadPart * 1000 / frequency.QuadPart);
+}
+/* Without this, WSAPoll rounds a 5ms timeout up to the system tick. */
+void xt_time_begin(void) { timeBeginPeriod(1); }
+void xt_time_end(void) { timeEndPeriod(1); }
 int xt_random(void *out, size_t n) { return n <= ULONG_MAX && BCryptGenRandom(NULL, out, (ULONG)n, BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0; }
 int xt_key_write(const char *path, const void *data, size_t n) {
     WCHAR wide[2048]; PSECURITY_DESCRIPTOR sd = NULL;
@@ -288,6 +299,9 @@ void xt_device_close(XtDevice *d) {
 
 struct XtDevice { int fd, index; char name[IFNAMSIZ]; XtRoute routes[XT_MAX_ROUTES]; unsigned route_count; };
 uint64_t xt_now(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec*1000 + ts.tv_nsec/1000000; }
+/* CLOCK_MONOTONIC is already ns-resolution and poll timeouts are hrtimer-backed. */
+void xt_time_begin(void) { }
+void xt_time_end(void) { }
 int xt_random(void *out, size_t n) {
     size_t at = 0;
     while (at < n) { ssize_t got = getrandom((char *)out+at, n-at, 0); if (got < 0 && errno == EINTR) continue; if (got <= 0) return 0; at += (size_t)got; }

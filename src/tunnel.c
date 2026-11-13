@@ -193,6 +193,7 @@ int xt_run(const XtConfig *cfg) {
     int hooks_started = 0, tun_watched = 0;
 #endif
     xt_install_signals();
+    xt_time_begin();
     if (socket_init() || xpoll_init()) goto done;
     xUdpConfig udp_cfg = {0}; udp_cfg.max_datagram = XDTLS_MAX_RECORD;
     /* Never drain more records per poll than an empty DTLS queue can hold. */
@@ -307,5 +308,6 @@ done:
     if (hooks_started && !run_hook("PostDown", cfg->post_down, 0)) rc = 1;
 #endif
     reset(t); xt_device_close(t->dev); xudp_destroy(t->udp); xpoll_uninit(); socket_cleanup();
+    xt_time_end();
     free(t); return rc;
 }

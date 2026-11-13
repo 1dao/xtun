@@ -23,6 +23,8 @@ typedef struct XtDevice XtDevice;
 typedef struct { uint64_t queue_full, oversize, write_ring_full, write_error; } XtDeviceStats;
 extern volatile sig_atomic_t xt_stop;
 void xt_install_signals(void);
+void xt_time_begin(void);
+void xt_time_end(void);
 uint64_t xt_now(void);
 int xt_random(void *, size_t);
 int xt_key_write(const char *, const void *, size_t);

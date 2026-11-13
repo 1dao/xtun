@@ -8,7 +8,7 @@ CFLAGS += -std=gnu11 -Wall -Wextra -MMD -MP
 ifeq ($(OS),Windows_NT)
 EXT = .exe
 BUILD ?= build
-LDLIBS += -lws2_32 -lbcrypt -ladvapi32 -liphlpapi
+LDLIBS += -lws2_32 -lbcrypt -ladvapi32 -liphlpapi -lwinmm
 else
 BUILD ?= build/linux
 LDLIBS += -lpthread -lm
