@@ -20,7 +20,7 @@ typedef struct {
     XtRoute local_networks[XT_MAX_ROUTES]; unsigned local_count;
 } XtConfig;
 typedef struct XtDevice XtDevice;
-typedef struct { uint64_t queue_full, oversize, write_ring_full, write_error; } XtDeviceStats;
+typedef struct { uint64_t oversize, write_ring_full, write_error; } XtDeviceStats;
 extern volatile sig_atomic_t xt_stop;
 void xt_install_signals(void);
 void xt_time_begin(void);

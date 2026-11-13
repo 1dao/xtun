@@ -23,7 +23,7 @@ struct XtDevice {
     void (WINAPI *ReleaseReceivePacket)(void *, BYTE *);
     BYTE *(WINAPI *AllocateSendPacket)(void *, DWORD);
     void (WINAPI *SendPacket)(void *, BYTE *);
-    HANDLE stop, thread;
+    HANDLE stop, room, thread;
     CRITICAL_SECTION lock;
     NET_LUID luid;
     MIB_UNICASTIPADDRESS_ROW address;
@@ -65,6 +65,18 @@ void xt_install_signals(void) { signal(SIGINT, on_signal); signal(SIGTERM, on_si
 static DWORD WINAPI reader(void *p) {
     XtDevice *d = p; HANDLE waits[2] = {d->stop, d->GetReadWaitEvent(d->session)};
     while (WaitForSingleObject(d->stop, 0) == WAIT_TIMEOUT) {
+        /* Leave the backlog in the 4 MB Wintun ring instead of discarding it
+         * here: this queue holds 64 packets, the ring holds thousands. */
+        EnterCriticalSection(&d->lock);
+        unsigned queued = d->count;
+        LeaveCriticalSection(&d->lock);
+        if (queued >= 64) {
+            HANDLE room[2] = {d->stop, d->room};
+            if (WaitForMultipleObjects(2, room, FALSE, INFINITE) == WAIT_FAILED) {
+                EnterCriticalSection(&d->lock); d->failed = 1; LeaveCriticalSection(&d->lock); break;
+            }
+            continue;
+        }
         DWORD n; BYTE *packet = d->ReceivePacket(d->session, &n);
         if (!packet) {
             if (GetLastError() != ERROR_NO_MORE_ITEMS) { EnterCriticalSection(&d->lock); d->failed = 1; LeaveCriticalSection(&d->lock); break; }
@@ -74,11 +86,11 @@ static DWORD WINAPI reader(void *p) {
             continue;
         }
         EnterCriticalSection(&d->lock);
-        if (n <= XT_MTU && d->count < 64) {
+        /* Only this thread enqueues, so the space checked above still holds. */
+        if (n <= XT_MTU) {
             unsigned tail = (d->head+d->count) % 64;
             memcpy(d->queue[tail].bytes, packet, n); d->queue[tail].n = n; ++d->count;
-        } else if (n > XT_MTU) ++d->stats.oversize;
-        else ++d->stats.queue_full;
+        } else ++d->stats.oversize;
         LeaveCriticalSection(&d->lock);
         d->ReleaseReceivePacket(d->session, packet);
     }
@@ -125,6 +137,8 @@ XtDevice *xt_device_open(const XtConfig *c, char error[256]) {
     if (status != NO_ERROR) { SetLastError(status); goto bad; }
     d->stop = CreateEventW(NULL, TRUE, FALSE, NULL);
     if (!d->stop) goto bad;
+    d->room = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (!d->room) goto bad;
     d->thread = CreateThread(NULL, 0, reader, d, 0, NULL);
     if (!d->thread) goto bad;
     return d;
@@ -250,6 +264,7 @@ int xt_device_read(XtDevice *d, void *out, size_t cap) {
         n = (int)d->queue[d->head].n;
         if ((size_t)n <= cap) memcpy(out, d->queue[d->head].bytes, (size_t)n); else n = -1;
         d->head = (d->head+1) % 64; --d->count;
+        if (d->count == 63) SetEvent(d->room);
     }
     LeaveCriticalSection(&d->lock); return n;
 }
@@ -277,6 +292,7 @@ void xt_device_close(XtDevice *d) {
     if (d->stop) SetEvent(d->stop);
     if (d->thread) { WaitForSingleObject(d->thread, INFINITE); CloseHandle(d->thread); }
     if (d->stop) CloseHandle(d->stop);
+    if (d->room) CloseHandle(d->room);
     remove_routes(d);
     if (d->address_set) DeleteUnicastIpAddressEntry(&d->address);
     if (d->session) d->EndSession(d->session);

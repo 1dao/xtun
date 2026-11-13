@@ -159,7 +159,7 @@ static void print_live_stats(Tunnel *t, uint64_t start) {
            "udp_send_block=%llu udp_send_err=%llu udp_recv_err=%llu "
            "tun_tx_bytes=%llu tun_rx_bytes=%llu dtls_drop=%llu txq_drop=%llu "
            "peer_drop=%llu frame_drop=%llu ip_drop=%llu tun_write_drop=%llu "
-           "win_queue_full=%llu win_oversize=%llu win_ring_full=%llu win_write_err=%llu\n",
+           "win_oversize=%llu win_ring_full=%llu win_write_err=%llu\n",
            (long long)time(NULL), (unsigned long long)(t->now - start), t->active,
            (unsigned long long)udp.datagrams_sent, (unsigned long long)udp.datagrams_received,
            (unsigned long long)udp.bytes_sent, (unsigned long long)udp.bytes_received,
@@ -169,7 +169,7 @@ static void print_live_stats(Tunnel *t, uint64_t start) {
            (unsigned long long)t->drop_dtls_input, (unsigned long long)t->drop_tx_queue,
            (unsigned long long)t->drop_peer, (unsigned long long)t->drop_frame,
            (unsigned long long)t->drop_ip, (unsigned long long)t->drop_tun_write,
-           (unsigned long long)dev.queue_full, (unsigned long long)dev.oversize,
+           (unsigned long long)dev.oversize,
            (unsigned long long)dev.write_ring_full, (unsigned long long)dev.write_error);
     fflush(stdout);
 }
@@ -300,7 +300,7 @@ int xt_run(const XtConfig *cfg) {
 done:
     ;
     XtDeviceStats dev = xt_device_stats(t->dev);
-    uint64_t device_drops = dev.queue_full + dev.oversize;
+    uint64_t device_drops = dev.oversize;
     printf("STATS tx_packets=%llu rx_packets=%llu tx_bytes=%llu rx_bytes=%llu drops=%llu "
         "drop_peer=%llu drop_dtls_input=%llu drop_tx_queue=%llu drop_frame=%llu "
         "drop_ip=%llu drop_tun_write=%llu drop_device=%llu\n",

@@ -154,8 +154,9 @@ are installed. Ctrl+C performs cleanup.
   `unix` is the wall-clock timestamp and `elapsed_ms` is monotonic elapsed
   time. `udp_tx`/`udp_rx` count outer UDP datagrams; `tun_tx_bytes` is
   written to the adapter and `tun_rx_bytes` is read from it and sent.
-  `win_queue_full`/`win_oversize` split Windows adapter read drops, and
-  `win_ring_full`/`win_write_err` split injection failures.
+  `win_oversize` counts Windows adapter read drops, and
+  `win_ring_full`/`win_write_err` split injection failures. A full adapter
+  read queue leaves the backlog in the Wintun ring instead of dropping it.
 
 On Linux, optional server settings `PostUp` and `PostDown` run trusted shell
 commands with the server's privileges. `PostUp` runs after the TUN interface
