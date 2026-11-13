@@ -8,6 +8,8 @@
 #include <time.h>
 #define XT_QUEUE 64
 #define XT_READ_BUDGET 32
+/* Linux clamps SO_RCVBUF/SO_SNDBUF to 2x rmem_max and ignores the rest. */
+#define XT_UDP_BUFFER (4*1024*1024)
 enum { READY = 1, DATA, PING, PONG, CLOSE };
 volatile sig_atomic_t xt_stop;
 
@@ -181,6 +183,19 @@ static int run_hook(const char *name, const char *command, int stop_on_error) {
     return status == 0;
 }
 #endif
+/* Returns the size the kernel actually granted, or 0 if it could not be read.
+ * Best effort: buffer sizing is a performance choice, not a correctness one. */
+static int udp_buffer_size(SOCKET_T fd, int option, int request) {
+    int value = request;
+#ifdef _WIN32
+    int len = sizeof(value);
+#else
+    socklen_t len = sizeof(value);
+#endif
+    if (setsockopt(fd, SOL_SOCKET, option, (const char*)&value, sizeof(value)) != 0) return 0;
+    if (getsockopt(fd, SOL_SOCKET, option, (char*)&value, &len) != 0) return 0;
+    return value;
+}
 int xt_run(const XtConfig *cfg) {
     Tunnel *t = calloc(1, sizeof(*t));
     if (!t) return 1;
@@ -201,6 +216,8 @@ int xt_run(const XtConfig *cfg) {
     udp_cfg.on_datagram = udp_receive; udp_cfg.on_error = udp_error; udp_cfg.userdata = t;
     t->udp = xudp_bind(cfg->bind_ip, cfg->bind_port, &udp_cfg, error);
     if (!t->udp) { fprintf(stderr, "UDP bind: %s\n", error); goto done; }
+    int rcvbuf = udp_buffer_size(xudp_fd(t->udp), SO_RCVBUF, XT_UDP_BUFFER);
+    int sndbuf = udp_buffer_size(xudp_fd(t->udp), SO_SNDBUF, XT_UDP_BUFFER);
     if (!cfg->server && xudp_address(cfg->remote_ip, (int)cfg->port, &t->peer)) goto done;
     if (!cfg->probe) {
         t->dev = xt_device_open(cfg, error);
@@ -213,7 +230,8 @@ int xt_run(const XtConfig *cfg) {
 #endif
     }
     xUdpAddress bound; xudp_sockname(t->udp, &bound);
-    printf("LISTEN %s:%u mode=%s%s\n", bound.ip, bound.port, cfg->server ? "server" : "client", cfg->probe ? " probe" : ""); fflush(stdout);
+    printf("LISTEN %s:%u mode=%s%s udp_rcvbuf=%d udp_sndbuf=%d\n", bound.ip, bound.port,
+           cfg->server ? "server" : "client", cfg->probe ? " probe" : "", rcvbuf, sndbuf); fflush(stdout);
     while (!xt_stop && !t->failed) {
         unsigned packets_read = 0;
 #ifdef _WIN32
