@@ -80,7 +80,8 @@ static int read_fields(XtConfig *c, const char *tag) {
         !field_number(tag, "port", &c->port, 51215, 1, 65535) ||
         !field_number(tag, "bind_port", &c->bind_port, c->server ? c->port : 0, 0, 65535) ||
         !field_number(tag, "run_seconds", &c->run_seconds, 0, 0, 86400) ||
-        !field_number(tag, "session_seconds", &c->session_seconds, 3600, 30, 86400)) return 0;
+        !field_number(tag, "session_seconds", &c->session_seconds, 3600, 30, 86400) ||
+        !field_number(tag, "stats_interval", &c->stats_interval, 0, 0, 3600)) return 0;
     if (!*c->identity || !*c->name || strlen(c->name) > 15 ||
         !xt_parse_ip(local, &c->address) || !xt_parse_ip(peer, &c->peer_address) ||
         c->address == c->peer_address || !xt_parse_ip(c->bind_ip, &bind) ||

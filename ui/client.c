@@ -6,7 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 
-enum { LOG_LINES = 120, LINE_SIZE = 512 };
+enum { LOG_LINES = 120, LINE_SIZE = 1024 };
 enum ConnectionState { DISCONNECTED, CONNECTING, CONNECTED, RECONNECTING, STOPPING, CLIENT_ERROR };
 #define UI_TEXT(X) \
     X(DISCONNECTED, "未连接", "Disconnected") \

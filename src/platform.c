@@ -28,7 +28,7 @@ struct XtDevice {
     MIB_UNICASTIPADDRESS_ROW address;
     MIB_IPFORWARD_ROW2 routes[XT_MAX_ROUTES + 3]; unsigned route_count;
     int address_set, failed;
-    uint64_t drops;
+    XtDeviceStats stats;
     unsigned head, count;
     struct { DWORD n; BYTE bytes[XT_MTU]; } queue[64];
 };
@@ -66,7 +66,8 @@ static DWORD WINAPI reader(void *p) {
         if (n <= XT_MTU && d->count < 64) {
             unsigned tail = (d->head+d->count) % 64;
             memcpy(d->queue[tail].bytes, packet, n); d->queue[tail].n = n; ++d->count;
-        } else ++d->drops;
+        } else if (n > XT_MTU) ++d->stats.oversize;
+        else ++d->stats.queue_full;
         LeaveCriticalSection(&d->lock);
         d->ReleaseReceivePacket(d->session, packet);
     }
@@ -243,12 +244,22 @@ int xt_device_read(XtDevice *d, void *out, size_t cap) {
 }
 int xt_device_write(XtDevice *d, const void *bytes, size_t n) {
     BYTE *packet = d->AllocateSendPacket(d->session, (DWORD)n);
-    if (!packet) return 0;
+    if (!packet) {
+        DWORD error = GetLastError();
+        EnterCriticalSection(&d->lock);
+        if (error == ERROR_BUFFER_OVERFLOW) ++d->stats.write_ring_full;
+        else ++d->stats.write_error;
+        LeaveCriticalSection(&d->lock);
+        return 0;
+    }
     memcpy(packet, bytes, n); d->SendPacket(d->session, packet); return (int)n;
 }
-uint64_t xt_device_drops(XtDevice *d) {
-    if (!d) return 0;
-    EnterCriticalSection(&d->lock); uint64_t n = d->drops; LeaveCriticalSection(&d->lock); return n;
+XtDeviceStats xt_device_stats(XtDevice *d) {
+    if (!d) return (XtDeviceStats){0};
+    EnterCriticalSection(&d->lock);
+    XtDeviceStats stats = d->stats;
+    LeaveCriticalSection(&d->lock);
+    return stats;
 }
 void xt_device_close(XtDevice *d) {
     if (!d) return;
@@ -362,7 +373,7 @@ int xt_device_read(XtDevice *d, void *out, size_t cap) {
     return (int)n;
 }
 int xt_device_write(XtDevice *d, const void *bytes, size_t n) { return (int)write(d->fd, bytes, n); }
-uint64_t xt_device_drops(XtDevice *d) { (void)d; return 0; }
+XtDeviceStats xt_device_stats(XtDevice *d) { (void)d; return (XtDeviceStats){0}; }
 void xt_device_close(XtDevice *d) {
     if (!d) return;
     for (unsigned i = 0; i < d->route_count; ++i) (void)route_change(d, &d->routes[i], 0);

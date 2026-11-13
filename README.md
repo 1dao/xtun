@@ -148,6 +148,14 @@ are installed. Ctrl+C performs cleanup.
   a client defaults to an ephemeral port.
 - `session_seconds`: full-handshake renewal interval, 30..86400, default 3600.
 - `run_seconds`: optional bounded runtime, default 0 (until interrupted).
+- `stats_interval`: seconds between `LIVE_STATS` lines (0 disables, default).
+  Set to 1 on both ends for diagnostics; for a tagged client use
+  `work.stats_interval=1` with the actual tag. Counters are cumulative.
+  `unix` is the wall-clock timestamp and `elapsed_ms` is monotonic elapsed
+  time. `udp_tx`/`udp_rx` count outer UDP datagrams; `tun_tx_bytes` is
+  written to the adapter and `tun_rx_bytes` is read from it and sent.
+  `win_queue_full`/`win_oversize` split Windows adapter read drops, and
+  `win_ring_full`/`win_write_err` split injection failures.
 
 On Linux, optional server settings `PostUp` and `PostDown` run trusted shell
 commands with the server's privileges. `PostUp` runs after the TUN interface

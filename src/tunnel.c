@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #define XT_QUEUE 64
 enum { READY = 1, DATA, PING, PONG, CLOSE };
 volatile sig_atomic_t xt_stop;
@@ -146,6 +147,29 @@ static void reset(Tunnel *t) {
     xdtls_close(t->dtls); xdtls_destroy(t->dtls); t->dtls = NULL;
     t->count = t->head = 0; t->active = t->pong = 0;
 }
+static void print_live_stats(Tunnel *t, uint64_t start) {
+    xUdpStats udp = {0};
+    xudp_get_stats(t->udp, &udp);
+    XtDeviceStats dev = xt_device_stats(t->dev);
+    printf("LIVE_STATS unix=%lld elapsed_ms=%llu active=%d "
+           "udp_tx=%llu udp_rx=%llu udp_tx_bytes=%llu udp_rx_bytes=%llu "
+           "udp_send_block=%llu udp_send_err=%llu udp_recv_err=%llu "
+           "tun_tx_bytes=%llu tun_rx_bytes=%llu dtls_drop=%llu txq_drop=%llu "
+           "peer_drop=%llu frame_drop=%llu ip_drop=%llu tun_write_drop=%llu "
+           "win_queue_full=%llu win_oversize=%llu win_ring_full=%llu win_write_err=%llu\n",
+           (long long)time(NULL), (unsigned long long)(t->now - start), t->active,
+           (unsigned long long)udp.datagrams_sent, (unsigned long long)udp.datagrams_received,
+           (unsigned long long)udp.bytes_sent, (unsigned long long)udp.bytes_received,
+           (unsigned long long)udp.send_would_block, (unsigned long long)udp.send_errors,
+           (unsigned long long)udp.receive_errors,
+           (unsigned long long)t->rx_bytes, (unsigned long long)t->tx_bytes,
+           (unsigned long long)t->drop_dtls_input, (unsigned long long)t->drop_tx_queue,
+           (unsigned long long)t->drop_peer, (unsigned long long)t->drop_frame,
+           (unsigned long long)t->drop_ip, (unsigned long long)t->drop_tun_write,
+           (unsigned long long)dev.queue_full, (unsigned long long)dev.oversize,
+           (unsigned long long)dev.write_ring_full, (unsigned long long)dev.write_error);
+    fflush(stdout);
+}
 #ifndef _WIN32
 static int run_hook(const char *name, const char *command, int stop_on_error) {
     if (!*command) return 1;
@@ -161,6 +185,8 @@ int xt_run(const XtConfig *cfg) {
     if (!t) return 1;
     t->cfg = cfg; t->now = xt_now();
     uint64_t start = t->now, retry_at = start;
+    uint64_t stats_period = (uint64_t)cfg->stats_interval * 1000;
+    uint64_t next_stats = start + stats_period;
     char error[256]; int rc = 1;
 #ifndef _WIN32
     int hooks_started = 0;
@@ -224,22 +250,29 @@ int xt_run(const XtConfig *cfg) {
                 }
             }
         }
+        if (stats_period && t->now >= next_stats) {
+            print_live_stats(t, start);
+            next_stats = t->now + stats_period;
+        }
         if (cfg->probe && !cfg->server && t->probe_ok) { rc = 0; break; }
         xpoll_poll(5);
     }
     if (xt_stop) rc = 0;
     if (t->failed) rc = 1;
 done:
+    ;
+    XtDeviceStats dev = xt_device_stats(t->dev);
+    uint64_t device_drops = dev.queue_full + dev.oversize;
     printf("STATS tx_packets=%llu rx_packets=%llu tx_bytes=%llu rx_bytes=%llu drops=%llu "
         "drop_peer=%llu drop_dtls_input=%llu drop_tx_queue=%llu drop_frame=%llu "
         "drop_ip=%llu drop_tun_write=%llu drop_device=%llu\n",
         (unsigned long long)t->tx_packets, (unsigned long long)t->rx_packets,
         (unsigned long long)t->tx_bytes, (unsigned long long)t->rx_bytes,
-        (unsigned long long)(t->drops + xt_device_drops(t->dev)),
+        (unsigned long long)(t->drops + device_drops),
         (unsigned long long)t->drop_peer, (unsigned long long)t->drop_dtls_input,
         (unsigned long long)t->drop_tx_queue, (unsigned long long)t->drop_frame,
         (unsigned long long)t->drop_ip, (unsigned long long)t->drop_tun_write,
-        (unsigned long long)xt_device_drops(t->dev));
+        (unsigned long long)device_drops);
     xUdpStats udp_stats = {0};
     if (t->udp) xudp_get_stats(t->udp, &udp_stats);
     printf("UDP_STATS rx_datagrams=%llu tx_datagrams=%llu rx_oversize=%llu "
