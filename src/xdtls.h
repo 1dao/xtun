@@ -30,6 +30,8 @@ int xdtls_read(xDtls *, void *, size_t);
 /* On AGAIN, retry with identical bytes/length before submitting other data. */
 int xdtls_write(xDtls *, const void *, size_t);
 int xdtls_ready(const xDtls *);
+unsigned xdtls_input_space(const xDtls *);
+int xdtls_write_pending(const xDtls *);
 int xdtls_closed(const xDtls *);
 int xdtls_last_error(const xDtls *);
 const char *xdtls_suite(const xDtls *);

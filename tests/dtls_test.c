@@ -14,12 +14,18 @@ typedef struct End {
     unsigned char saved[XDTLS_MAX_RECORD];
     size_t saved_len;
     unsigned sent;
+    xUdp *udp;
+    xUdpAddress destination;
 } End;
 static int transport(void *p, const unsigned char *data, size_t n) {
     End *e = p;
     if (e->block) { --e->block; return XDTLS_AGAIN; }
     ++e->sent;
     memcpy(e->saved, data, n); e->saved_len = n;
+    if (e->udp) {
+        int error;
+        return xudp_sendto(e->udp, data, n, &e->destination, &error) == XUDP_OK ? (int)n : XDTLS_ERROR;
+    }
     if (e->drop) { --e->drop; return (int)n; }
     if (!e->hold) assert(xdtls_feed(e->peer->dtls, data, n) == 0);
     return (int)n;
@@ -147,6 +153,86 @@ static void udp_test(void) {
     assert(!xudp_live_count() && !xudp_socket_count()); xpoll_uninit(); socket_cleanup();
     puts("PASS real UDP loopback and resource cleanup");
 }
+typedef struct { xDtls *dtls; unsigned received, rejected; } Input;
+static void bounded_input(xUdp *u, const char *data, size_t n, const xUdpAddress *from, void *p) {
+    Input *input = p;
+    (void)from;
+    ++input->received;
+    if (xdtls_feed(input->dtls, data, n)) ++input->rejected;
+    if (!xdtls_input_space(input->dtls)) xudp_pause_read(u);
+}
+static void duplex_backpressure_test(void) {
+    End a, b;
+    pair(&a, &b, 0, 0); assert(handshake(&a, &b));
+    assert(!socket_init()); assert(!xpoll_init());
+    Input input = {a.dtls, 0, 0};
+    char error[XSOCK_ERR_LEN];
+    xUdpConfig cfg = {0};
+    /* Deliberately exceed the DTLS capacity within a single read callback. */
+    cfg.recv_budget = XDTLS_RX_SLOTS * 2;
+    cfg.on_datagram = bounded_input; cfg.userdata = &input;
+    xUdp *receiver = xudp_bind("127.0.0.1", 0, &cfg, error);
+    xUdp *sender = xudp_bind("127.0.0.1", 0, NULL, error);
+    assert(receiver && sender);
+    b.udp = sender; assert(!xudp_sockname(receiver, &b.destination));
+    a.block = 3;
+    assert(xdtls_write(a.dtls, "pending", 7) == XDTLS_AGAIN);
+    unsigned char out[2048];
+    for (unsigned char i = 0; i < XDTLS_RX_SLOTS + 8; ++i)
+        assert(xdtls_write(b.dtls, &i, 1) == 1);
+    for (int i = 0; i < 100 && input.received < XDTLS_RX_SLOTS; ++i) xpoll_poll(5);
+    assert(input.received == XDTLS_RX_SLOTS && !input.rejected);
+    assert(!xdtls_input_space(a.dtls));
+    for (int i = 0; i < 2; ++i) {
+        assert(xdtls_write(a.dtls, "pending", 7) == XDTLS_AGAIN);
+        assert(xdtls_read(a.dtls, out, sizeof(out)) == XDTLS_AGAIN);
+        xpoll_poll(0);
+        assert(input.received == XDTLS_RX_SLOTS && !input.rejected);
+    }
+    assert(xdtls_write_pending(a.dtls));
+    assert(xdtls_write(a.dtls, "pending", 7) == 7);
+    assert(!xdtls_write_pending(a.dtls));
+    /* Drain before resuming, including when only part of the queue fits. */
+    for (unsigned char i = 0; i < 4; ++i)
+        assert(xdtls_read(a.dtls, out, sizeof(out)) == 1 && out[0] == i);
+    assert(xdtls_input_space(a.dtls) == 4);
+    assert(!xudp_resume_read(receiver));
+    for (int i = 0; i < 100 && input.received < XDTLS_RX_SLOTS + 4; ++i) xpoll_poll(5);
+    assert(input.received == XDTLS_RX_SLOTS + 4 && !input.rejected);
+    for (unsigned char i = 4; i < XDTLS_RX_SLOTS + 4; ++i)
+        assert(xdtls_read(a.dtls, out, sizeof(out)) == 1 && out[0] == i);
+    assert(!xudp_resume_read(receiver));
+    assert(!xudp_resume_read(receiver)); /* idempotent */
+    for (int i = 0; i < 100 && input.received < XDTLS_RX_SLOTS + 8; ++i) xpoll_poll(5);
+    assert(input.received == XDTLS_RX_SLOTS + 8 && !input.rejected);
+    for (unsigned char i = XDTLS_RX_SLOTS + 4; i < XDTLS_RX_SLOTS + 8; ++i)
+        assert(xdtls_read(a.dtls, out, sizeof(out)) == 1 && out[0] == i);
+    assert(xdtls_read(a.dtls, out, sizeof(out)) == XDTLS_AGAIN);
+    assert(xdtls_read(b.dtls, out, sizeof(out)) == 7 && !memcmp(out, "pending", 7));
+    assert(xdtls_read(b.dtls, out, sizeof(out)) == XDTLS_AGAIN);
+    /* Reset while full/paused must allow the replacement session to receive. */
+    for (unsigned char i = 0; i < XDTLS_RX_SLOTS; ++i)
+        assert(xdtls_write(b.dtls, &i, 1) == 1);
+    for (int i = 0; i < 100 && xdtls_input_space(a.dtls); ++i) xpoll_poll(5);
+    assert(!xdtls_input_space(a.dtls) && !input.rejected);
+    destroy(&a, &b); pair(&a, &b, 0, 0); assert(handshake(&a, &b));
+    input.dtls = a.dtls;
+    b.udp = sender; assert(!xudp_sockname(receiver, &b.destination));
+    assert(!xudp_resume_read(receiver));
+    unsigned before = input.received;
+    assert(xdtls_write(b.dtls, "reset", 5) == 5);
+    for (int i = 0; i < 100 && input.received == before; ++i) xpoll_poll(5);
+    assert(input.received == before + 1 && !input.rejected);
+    assert(xdtls_read(a.dtls, out, sizeof(out)) == 5 && !memcmp(out, "reset", 5));
+    xudp_destroy(sender);
+    xudp_pause_read(receiver); xudp_pause_read(receiver);
+    assert(xpoll_fd_count() == 1); /* retain error watch even with no readable fd */
+    assert(xpoll_poll(0) == 0);
+    xudp_destroy(receiver);
+    assert(!xudp_live_count() && !xudp_socket_count());
+    xpoll_uninit(); socket_cleanup(); destroy(&a, &b);
+    puts("PASS full-duplex send backpressure pauses UDP before DTLS overflow and resumes without loss/duplicates");
+}
 static void packet_tests(void) {
     XtConfig c = {0}; XtRoute route;
     assert(xt_parse_ip("10.77.0.2", &c.address));
@@ -170,6 +256,7 @@ static void packet_tests(void) {
 int main(void) {
     channel_tests();
     udp_test();
+    duplex_backpressure_test();
     packet_tests();
     puts("ALL TESTS PASSED");
     return 0;

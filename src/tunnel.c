@@ -74,6 +74,8 @@ static void udp_receive(xUdp *u, const char *data, size_t n, const xUdpAddress *
     }
     if (from->port != t->peer.port || strcmp(from->ip, t->peer.ip)) { ++t->drops; ++t->drop_peer; return; }
     if (xdtls_feed(t->dtls, data, n)) { ++t->drops; ++t->drop_dtls_input; }
+    /* Stop this receive pass as soon as the downstream queue is full. */
+    if (!xdtls_input_space(t->dtls)) xudp_pause_read(t->udp);
 }
 static void udp_error(xUdp *u, int error, bool fatal, void *p) {
     (void)u;
@@ -93,8 +95,8 @@ static void queue_ready(Tunnel *t) {
     p[8] = XT_MTU >> 8; p[9] = XT_MTU & 255;
     if (enqueue(t, READY, p, sizeof(p))) t->last_ready = t->now;
 }
-static int flush(Tunnel *t) {
-    for (unsigned i = 0; i < XT_QUEUE && t->count; ++i) {
+static int flush(Tunnel *t, unsigned budget) {
+    for (unsigned i = 0; i < budget && t->count; ++i) {
         unsigned head = t->head; size_t n = t->queue[head].len;
         int rc = xdtls_write(t->dtls, t->queue[head].bytes, n);
         if (rc == XDTLS_AGAIN) return 1;
@@ -251,7 +253,9 @@ int xt_run(const XtConfig *cfg) {
                 reset(t); retry_at = t->now+1000;
             } else if (step == 1) {
                 if (!t->active && t->now-t->last_ready >= 1000) queue_ready(t);
-                if (!receive_messages(t)) { reset(t); retry_at = t->now+1000; }
+                /* Complete only the pending write before RX; submitting a new
+                 * write here could block RX again even after recovery. */
+                if ((xdtls_write_pending(t->dtls) && !flush(t, 1)) || !receive_messages(t)) { reset(t); retry_at = t->now+1000; }
                 else {
                     if (t->active && t->now-t->last_ping >= (cfg->probe ? 1000u : 20000u)) {
                         unsigned char stamp[8]; put32(stamp, (uint32_t)(t->now>>32)); put32(stamp+4, (uint32_t)t->now);
@@ -268,7 +272,7 @@ int xt_run(const XtConfig *cfg) {
                             else { ++t->drops; ++t->drop_ip; }
                         }
                     }
-                    if (!flush(t)) { reset(t); retry_at = t->now+1000; }
+                    if (!flush(t, XT_QUEUE)) { reset(t); retry_at = t->now+1000; }
                 }
             }
         }
@@ -277,6 +281,13 @@ int xt_run(const XtConfig *cfg) {
             next_stats = t->now + stats_period;
         }
         if (cfg->probe && !cfg->server && t->probe_ok) { rc = 0; break; }
+        /* Like the TUN backlog, leave UDP backlog upstream until there is
+         * room. Reset sessions must also restore the listener. */
+        if ((!t->dtls || xdtls_input_space(t->dtls)) && xudp_resume_read(t->udp) != XUDP_OK) {
+            fputs("cannot resume UDP reads\n", stderr);
+            t->failed = 1;
+            break;
+        }
         int can_read_tun = t->dev && t->active && t->count < XT_QUEUE-4;
 #ifndef _WIN32
         /* Read TUN in the main loop. epoll only needs to wake it, and
@@ -319,7 +330,7 @@ done:
         (unsigned long long)udp_stats.dropped_oversize, (unsigned long long)udp_stats.receive_errors,
         (unsigned long long)udp_stats.send_errors, (unsigned long long)udp_stats.send_would_block);
     if (xdtls_ready(t->dtls) && t->active && !t->count) {
-        enqueue(t, CLOSE, NULL, 0); (void)flush(t);
+        enqueue(t, CLOSE, NULL, 0); (void)flush(t, XT_QUEUE);
     }
 #ifndef _WIN32
     if (tun_watched) xpoll_del_event(xt_device_fd(t->dev), XPOLL_READABLE);

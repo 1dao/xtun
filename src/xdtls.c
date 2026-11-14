@@ -173,6 +173,8 @@ int xdtls_write(xDtls *d, const void *bytes, size_t n) {
     return rc > 0 ? rc : fail(d, rc);
 }
 int xdtls_ready(const xDtls *d) { return d && d->ready && !d->closed; }
+unsigned xdtls_input_space(const xDtls *d) { return d && !d->closed ? XDTLS_RX_SLOTS - d->count : 0; }
+int xdtls_write_pending(const xDtls *d) { return d && d->write_pending; }
 int xdtls_closed(const xDtls *d) { return !d || d->closed; }
 int xdtls_last_error(const xDtls *d) { return d ? d->error : 0; }
 const char *xdtls_suite(const xDtls *d) { return xdtls_ready(d) ? mbedtls_ssl_get_ciphersuite(&d->ssl) : "none"; }

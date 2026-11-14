@@ -166,7 +166,9 @@ removal. Use cleanup commands that can handle partial setup. `--check` and
 `--probe` do not run hooks. A forced kill cannot run cleanup.
 
 Use the commented, scoped iptables example in the root `server.cfg` or
-your own firewall rules. Hooks run through `/bin/sh`, and `PostUp` enables
+your own firewall rules. The example is idempotent: `PostUp` checks before
+adding and `PostDown` removes every copy, so restarts do not accumulate
+duplicate rules. Hooks run through `/bin/sh`, and `PostUp` enables
 shell error checking. `PostDown` reports its shell exit status, so a cleanup
 script that tries several operations should return failure if any fail.
 IPv4 forwarding is still a system setting. The Linux integration test
