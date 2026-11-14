@@ -15,11 +15,17 @@ typedef struct End {
     size_t saved_len;
     unsigned sent;
     xUdp *udp;
+    xUdp *write_wait;
     xUdpAddress destination;
 } End;
 static int transport(void *p, const unsigned char *data, size_t n) {
     End *e = p;
-    if (e->block) { --e->block; return XDTLS_AGAIN; }
+    if (e->block) {
+        --e->block;
+        if (e->write_wait) assert(!xudp_wait_writable(e->write_wait, true));
+        return XDTLS_AGAIN;
+    }
+    if (e->write_wait) assert(!xudp_wait_writable(e->write_wait, false));
     ++e->sent;
     memcpy(e->saved, data, n); e->saved_len = n;
     if (e->udp) {
@@ -174,6 +180,7 @@ static void duplex_backpressure_test(void) {
     xUdp *receiver = xudp_bind("127.0.0.1", 0, &cfg, error);
     xUdp *sender = xudp_bind("127.0.0.1", 0, NULL, error);
     assert(receiver && sender);
+    a.write_wait = receiver;
     b.udp = sender; assert(!xudp_sockname(receiver, &b.destination));
     a.block = 3;
     assert(xdtls_write(a.dtls, "pending", 7) == XDTLS_AGAIN);
@@ -186,7 +193,8 @@ static void duplex_backpressure_test(void) {
     for (int i = 0; i < 2; ++i) {
         assert(xdtls_write(a.dtls, "pending", 7) == XDTLS_AGAIN);
         assert(xdtls_read(a.dtls, out, sizeof(out)) == XDTLS_AGAIN);
-        xpoll_poll(0);
+        assert(xpoll_poll(100) > 0); /* writable wakes even while RX is paused */
+        assert(xpoll_poll(0) == 0); /* one shot, no writable busy loop */
         assert(input.received == XDTLS_RX_SLOTS && !input.rejected);
     }
     assert(xdtls_write_pending(a.dtls));
@@ -227,11 +235,24 @@ static void duplex_backpressure_test(void) {
     xudp_destroy(sender);
     xudp_pause_read(receiver); xudp_pause_read(receiver);
     assert(xpoll_fd_count() == 1); /* retain error watch even with no readable fd */
+    assert(!xudp_wait_writable(receiver, true));
+    assert(!xudp_wait_writable(receiver, true)); /* idempotent arm */
+    assert(xpoll_poll(100) > 0);
     assert(xpoll_poll(0) == 0);
+    assert(!xudp_wait_writable(receiver, true));
+    assert(!xudp_wait_writable(receiver, false)); /* cancel before readiness */
+    assert(xpoll_poll(0) == 0);
+    assert(!xudp_resume_read(receiver)); /* restoring RX must preserve write watch */
+    assert(!xudp_wait_writable(receiver, true));
+    xudp_pause_read(receiver);
+    assert(!xudp_resume_read(receiver));
+    assert(xpoll_poll(100) > 0);
+    assert(xpoll_poll(0) == 0);
+    assert(!xudp_wait_writable(receiver, true)); /* close while armed */
     xudp_destroy(receiver);
     assert(!xudp_live_count() && !xudp_socket_count());
     xpoll_uninit(); socket_cleanup(); destroy(&a, &b);
-    puts("PASS full-duplex send backpressure pauses UDP before DTLS overflow and resumes without loss/duplicates");
+    puts("PASS full-duplex backpressure, one-shot writable wakeups, cancellation and read pause/resume without loss/duplicates");
 }
 static void packet_tests(void) {
     XtConfig c = {0}; XtRoute route;

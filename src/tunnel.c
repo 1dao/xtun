@@ -48,6 +48,7 @@ typedef struct {
 static int dtls_send(void *p, const unsigned char *data, size_t n) {
     Tunnel *t = p; int error;
     int rc = xudp_sendto(t->udp, data, n, &t->peer, &error);
+    if (xudp_wait_writable(t->udp, rc == XUDP_WOULD_BLOCK) != XUDP_OK) return XDTLS_ERROR;
     return rc == XUDP_OK ? (int)n : rc == XUDP_WOULD_BLOCK ? XDTLS_AGAIN : XDTLS_ERROR;
 }
 static int new_session(Tunnel *t) {
@@ -150,6 +151,8 @@ static int receive_messages(Tunnel *t) {
 }
 static void reset(Tunnel *t) {
     xdtls_close(t->dtls); xdtls_destroy(t->dtls); t->dtls = NULL;
+    /* Also cancel a wakeup armed by the best-effort close_notify. */
+    (void)xudp_wait_writable(t->udp, false);
     t->count = t->head = 0; t->active = t->pong = 0;
 }
 static void print_live_stats(Tunnel *t, uint64_t start) {
