@@ -68,6 +68,17 @@ static void channel_tests(void) {
     assert(handshake(&a, &b));
     assert(strstr(xdtls_suite(a.dtls), "ECDHE-PSK-WITH-CHACHA20-POLY1305"));
     assert(xdtls_max_payload(a.dtls) > 1288);
+    unsigned mtu = xt_mtu_offer(xdtls_max_payload(a.dtls), 0);
+    assert(mtu > XT_MTU && mtu <= XT_MTU_MAX);
+    assert(xt_mtu_offer(XT_HEADER + XT_MTU - 1, 0) == 0);
+    assert(xt_mtu_offer(4096, 0) == XT_MTU_MAX);
+    assert(xt_mtu_offer(xdtls_max_payload(a.dtls), 1300) == 1300);
+    memset(buf, 0xa5, mtu + XT_HEADER);
+    assert(xdtls_write(a.dtls, buf, mtu + XT_HEADER) == (int)(mtu + XT_HEADER));
+    assert(a.saved_len <= 1400);
+    assert(xdtls_read(b.dtls, buf, sizeof(buf)) == (int)(mtu + XT_HEADER));
+    for (unsigned i = 0; i < mtu + XT_HEADER; ++i) assert(buf[i] == 0xa5);
+    printf("PASS DTLS-derived inner MTU=%u fits a single record\n", mtu);
     printf("PASS handshake survives initial packet loss; suite=%s\n", xdtls_suite(a.dtls));
     a.block = 1;
     assert(xdtls_write(a.dtls, message, sizeof(message)) == XDTLS_AGAIN);
@@ -272,6 +283,16 @@ static void packet_tests(void) {
     ip[19]^=1; assert(!xt_packet_valid(&c,ip,sizeof(ip),1)); ip[19]^=1;
     c.routes[0].network++; assert(!xt_packet_valid(&c,ip,sizeof(ip),1));
     assert(!xt_packet_valid(&c,ip,19,1));
+    --c.routes[0].network;
+    unsigned char large[1351] = {0}; memcpy(large, ip, 20);
+    large[2] = 1350 >> 8; large[3] = 1350 & 255; large[10] = large[11] = 0;
+    sum = 0; for (unsigned i=0;i<20;i+=2) sum += (unsigned)large[i]*256+large[i+1];
+    while (sum>>16) sum=(sum&65535)+(sum>>16);
+    sum=~sum; large[10]=sum>>8; large[11]=sum;
+    assert(!xt_packet_valid(&c, large, 1350, 1));
+    c.mtu = 1350;
+    assert(xt_packet_valid(&c, large, 1350, 1));
+    assert(!xt_packet_valid(&c, large, 1351, 1));
     puts("PASS IPv4 length/checksum validation and address authorization");
 }
 int main(void) {

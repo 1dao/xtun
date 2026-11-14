@@ -32,7 +32,7 @@ struct XtDevice {
     int address_set, failed;
     XtDeviceStats stats;
     unsigned head, count;
-    struct { DWORD n; BYTE bytes[XT_MTU]; } queue[64];
+    struct { DWORD n; BYTE bytes[XT_MTU_MAX]; } queue[64];
 };
 /* GetTickCount64 quantizes to the 15.6ms system tick; timeBeginPeriod does not refine it. */
 uint64_t xt_now(void) {
@@ -108,7 +108,7 @@ static DWORD WINAPI reader(void *p) {
         }
         EnterCriticalSection(&d->lock);
         /* Only this thread enqueues, so the space checked above still holds. */
-        if (n <= XT_MTU) {
+        if (n <= XT_MTU_MAX) {
             unsigned tail = (d->head+d->count) % 64;
             memcpy(d->queue[tail].bytes, packet, n); d->queue[tail].n = n; ++d->count;
             if (d->count == 1) wake_signal(d);
@@ -300,6 +300,15 @@ int xt_device_read(XtDevice *d, void *out, size_t cap) {
     LeaveCriticalSection(&d->lock); return n;
 }
 uintptr_t xt_device_fd(const XtDevice *d) { return (uintptr_t)d->wake[1]; }
+int xt_device_set_mtu(XtDevice *d, unsigned mtu, char error[256]) {
+    if (mtu < XT_MTU || mtu > XT_MTU_MAX) { snprintf(error, 256, "invalid inner MTU"); return 0; }
+    MIB_IPINTERFACE_ROW iface;
+    InitializeIpInterfaceEntry(&iface); iface.Family = AF_INET; iface.InterfaceLuid = d->luid;
+    DWORD status = GetIpInterfaceEntry(&iface);
+    if (status == NO_ERROR) { iface.NlMtu = mtu; status = SetIpInterfaceEntry(&iface); }
+    if (status != NO_ERROR) { snprintf(error, 256, "Windows MTU error %lu", status); return 0; }
+    return 1;
+}
 int xt_device_write(XtDevice *d, const void *bytes, size_t n) {
     BYTE *packet = d->AllocateSendPacket(d->session, (DWORD)n);
     if (!packet) {
@@ -438,6 +447,15 @@ int xt_device_read(XtDevice *d, void *out, size_t cap) {
 }
 int xt_device_write(XtDevice *d, const void *bytes, size_t n) { return (int)write(d->fd, bytes, n); }
 int xt_device_fd(const XtDevice *d) { return d->fd; }
+int xt_device_set_mtu(XtDevice *d, unsigned mtu, char error[256]) {
+    if (mtu < XT_MTU || mtu > XT_MTU_MAX) { snprintf(error, 256, "invalid inner MTU"); return 0; }
+    int s = socket(AF_INET, SOCK_DGRAM|SOCK_CLOEXEC, 0);
+    if (s < 0) { snprintf(error, 256, "%s", strerror(errno)); return 0; }
+    struct ifreq req = {0}; strcpy(req.ifr_name, d->name); req.ifr_mtu = (int)mtu;
+    int ok = ioctl(s, SIOCSIFMTU, &req) == 0;
+    if (!ok) snprintf(error, 256, "%s", strerror(errno));
+    close(s); return ok;
+}
 XtDeviceStats xt_device_stats(XtDevice *d) { (void)d; return (XtDeviceStats){0}; }
 void xt_device_close(XtDevice *d) {
     if (!d) return;

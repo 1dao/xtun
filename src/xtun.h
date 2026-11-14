@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <signal.h>
 #define XT_MTU 1280
+#define XT_MTU_MAX 1400
 #define XT_MAX_ROUTES 16
 #define XT_HEADER 8
 #define XT_CLIENT_CONFIG "client.cfg"
@@ -14,6 +15,7 @@ typedef struct {
     char bind_ip[64], remote_ip[64], identity[65], name[32];
     char post_up[2048], post_down[2048];
     unsigned port, bind_port, run_seconds, session_seconds, stats_interval;
+    unsigned mtu_limit, mtu; /* configured ceiling (0 auto), active inner MTU */
     uint32_t address, peer_address, endpoint_address, dns_address;
     unsigned char key[32];
     XtRoute routes[XT_MAX_ROUTES]; unsigned route_count;
@@ -36,6 +38,7 @@ uintptr_t xt_device_fd(const XtDevice *); /* pollable queue wakeup socket */
 int xt_device_fd(const XtDevice *);
 #endif
 int xt_device_write(XtDevice *, const void *, size_t);
+int xt_device_set_mtu(XtDevice *, unsigned, char error[256]);
 int xt_device_routes(XtDevice *, const XtConfig *, char error[256]);
 void xt_device_close(XtDevice *);
 XtDeviceStats xt_device_stats(XtDevice *);
@@ -44,5 +47,6 @@ int xt_load_config(XtConfig *, const char *, const char *tag);
 int xt_parse_route(const char *, XtRoute *);
 int xt_allowed(const XtConfig *, uint32_t);
 int xt_packet_valid(const XtConfig *, const void *, size_t, int inbound);
+unsigned xt_mtu_offer(size_t dtls_payload, unsigned ceiling);
 int xt_run(const XtConfig *);
 #endif

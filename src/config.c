@@ -81,7 +81,10 @@ static int read_fields(XtConfig *c, const char *tag) {
         !field_number(tag, "bind_port", &c->bind_port, c->server ? c->port : 0, 0, 65535) ||
         !field_number(tag, "run_seconds", &c->run_seconds, 0, 0, 86400) ||
         !field_number(tag, "session_seconds", &c->session_seconds, 3600, 30, 86400) ||
-        !field_number(tag, "stats_interval", &c->stats_interval, 0, 0, 3600)) return 0;
+        !field_number(tag, "stats_interval", &c->stats_interval, 0, 0, 3600) ||
+        !field_number(tag, "mtu", &c->mtu_limit, 0, 0, XT_MTU_MAX)) return 0;
+    if (c->mtu_limit && c->mtu_limit < XT_MTU) return 0;
+    c->mtu = XT_MTU;
     if (!*c->identity || !*c->name || strlen(c->name) > 15 ||
         !xt_parse_ip(local, &c->address) || !xt_parse_ip(peer, &c->peer_address) ||
         c->address == c->peer_address || !xt_parse_ip(c->bind_ip, &bind) ||

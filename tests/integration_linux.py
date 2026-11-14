@@ -2,6 +2,7 @@
 """Root-only, isolated TUN/forwarding/NAT acceptance. Host routes stay untouched."""
 import hashlib
 import os
+import re
 from pathlib import Path
 import signal
 import subprocess
@@ -71,7 +72,7 @@ def main():
         config(directory/"server.cfg", **server_settings,
                PostUp="nft -f hook.nft", PostDown="nft delete table ip xtun_test")
         config(directory/"client.cfg", address="10.77.0.2", peer_address="10.77.0.1",
-               bind="192.0.2.1", endpoint="192.0.2.2", port=PORT, name="xtun0", routes=["198.19.0.0/24"])
+               bind="192.0.2.1", endpoint="192.0.2.2", port=PORT, name="xtun0", routes=["198.19.0.0/24"], mtu=1330)
         ns(server,"sysctl","-q","-w","net.ipv4.ip_forward=1")
         (directory/"hook.nft").write_text("table ip xtun_test {\nchain postrouting {\ntype nat hook postrouting priority srcnat;\nip saddr 10.77.0.2 ip daddr 198.19.0.0/24 masquerade\n}\n}\n")
         sp, sl = spawn(server,[BIN,"server"],"server.log")
@@ -82,6 +83,11 @@ def main():
                 raise AssertionError("tunnel did not become ready\n"+contents(sl)+contents(cl))
             time.sleep(.05)
         print("PASS real TUN adapters and encrypted READY", flush=True)
+        for name, log in ((client, cl), (server, sl)):
+            assert "mtu=1330 " in contents(log), contents(log)
+            assert '"mtu":1330' in ns(name,"ip","-j","link","show","xtun0").stdout.replace(" ", "")
+        ns(client,"ping","-n","-c","1","-W","2","-M","do","-s","1302","10.77.0.1")
+        print("PASS asymmetric MTU negotiation, both real TUN MTUs and maximum-size DF packet", flush=True)
         ns(client,"ping","-n","-c","3","-W","2","10.77.0.1")
         print("PASS tunnel-address ICMP",flush=True)
         ns(client,"ping","-n","-c","3","-W","2","198.19.0.2")
@@ -129,6 +135,24 @@ u.close()
             time.sleep(.1)
         ns(client,"ping","-n","-c","1","-W","2","198.19.0.2")
         print("PASS fresh ECDHE session after lifetime expiry; routes preserved",flush=True)
+        # A replacement client can grow/shrink the server's MTU across sessions.
+        for ceiling in (0, 1280):
+            cp.send_signal(signal.SIGTERM); assert cp.wait(timeout=8) == 0
+            ready_count = contents(sl).count("READY ")
+            config(directory/"client.cfg", address="10.77.0.2", peer_address="10.77.0.1",
+                   bind="192.0.2.1", endpoint="192.0.2.2", port=PORT, name="xtun0",
+                   routes=["198.19.0.0/24"], mtu=ceiling)
+            cp, cl = spawn(client,[BIN,"client"],f"client-mtu-{ceiling}.log")
+            deadline = time.monotonic()+15
+            while "READY " not in contents(cl) or contents(sl).count("READY ") <= ready_count:
+                assert time.monotonic() < deadline and sp.poll() is None and cp.poll() is None
+                time.sleep(.05)
+            selected = int(re.search(r"READY .* mtu=(\d+)", contents(cl))[1])
+            assert selected > 1330 if ceiling == 0 else selected == 1280
+            for name in (client, server):
+                assert f'"mtu":{selected}' in ns(name,"ip","-j","link","show","xtun0").stdout.replace(" ", "")
+            ns(client,"ping","-n","-c","1","-W","2","-M","do","-s",str(selected-28),"198.19.0.2")
+        print("PASS reconnect MTU growth/shrink, adapter updates and maximum-size DF forwarding",flush=True)
         # Normal shutdown must remove the adapter and only this process's routes.
         for p in [cp,sp]: p.send_signal(signal.SIGTERM)
         for p in [cp,sp]: assert p.wait(timeout=8)==0

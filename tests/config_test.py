@@ -29,6 +29,8 @@ def main():
             assert (result.returncode==0)==expected,(changes,result.stdout,result.stderr)
             assert original.decode() not in result.stdout+result.stderr
         check({},True)
+        for mtu in (0, 1280, 1300, 1400): check({"mtu":mtu},True)
+        for mtu in (-1, 1, 1279, 1401, "auto", "1300x"): check({"mtu":mtu},False)
         check({"routes":["198.19.0.0/24", "203.0.113.0/24"]},True)
         check({"routes":"198.19.0.0/24,"},False)
         check({"routes":["0.0.0.0/0"]},False)

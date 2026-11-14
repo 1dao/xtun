@@ -15,9 +15,16 @@ volatile sig_atomic_t xt_stop;
 
 static uint32_t be32(const unsigned char *p) { return (uint32_t)p[0]<<24 | (uint32_t)p[1]<<16 | (uint32_t)p[2]<<8 | p[3]; }
 static void put32(unsigned char *p, uint32_t n) { p[0]=n>>24; p[1]=n>>16; p[2]=n>>8; p[3]=n; }
+unsigned xt_mtu_offer(size_t payload, unsigned ceiling) {
+    if (payload < XT_HEADER + XT_MTU) return 0;
+    size_t mtu = payload - XT_HEADER;
+    if (mtu > XT_MTU_MAX) mtu = XT_MTU_MAX;
+    if (ceiling && mtu > ceiling) mtu = ceiling;
+    return mtu >= XT_MTU ? (unsigned)mtu : 0;
+}
 int xt_packet_valid(const XtConfig *c, const void *bytes, size_t n, int inbound) {
     const unsigned char *p = bytes;
-    if (n < 20 || n > XT_MTU || (p[0] >> 4) != 4) return 0;
+    if (n < 20 || n > (c->mtu ? c->mtu : XT_MTU) || (p[0] >> 4) != 4) return 0;
     size_t header = (p[0] & 15) * 4;
     if (header < 20 || header > n || ((size_t)p[2]<<8 | p[3]) != n) return 0;
     unsigned sum = 0;
@@ -33,7 +40,7 @@ int xt_packet_valid(const XtConfig *c, const void *bytes, size_t n, int inbound)
     return local_allowed && xt_allowed(c, inbound ? src : dst);
 }
 typedef struct {
-    const XtConfig *cfg;
+    XtConfig *cfg;
     xUdp *udp;
     xUdpAddress peer;
     xDtls *dtls;
@@ -42,7 +49,8 @@ typedef struct {
     uint64_t tx_packets, rx_packets, drops, tx_bytes, rx_bytes;
     uint64_t drop_peer, drop_dtls_input, drop_tx_queue, drop_frame, drop_ip, drop_tun_write;
     unsigned head, count;
-    struct { size_t len; unsigned char bytes[XT_HEADER + XT_MTU]; } queue[XT_QUEUE];
+    unsigned mtu_offer, peer_offer, mtu_selected;
+    struct { size_t len; unsigned char bytes[XT_HEADER + XT_MTU_MAX]; } queue[XT_QUEUE];
     int active, routes, failed, probe_ok, pong;
 } Tunnel;
 static int dtls_send(void *p, const unsigned char *data, size_t n) {
@@ -84,7 +92,8 @@ static void udp_error(xUdp *u, int error, bool fatal, void *p) {
 }
 static int enqueue(Tunnel *t, unsigned type, const void *data, size_t n) {
     /* Reserve four slots for control. All buffers have fixed byte bounds. */
-    if (n > XT_MTU || t->count >= (type == DATA ? XT_QUEUE-4 : XT_QUEUE)) { ++t->drops; ++t->drop_tx_queue; return 0; }
+    if (n > XT_MTU_MAX || (type == DATA && n > t->cfg->mtu) ||
+        t->count >= (type == DATA ? XT_QUEUE-4 : XT_QUEUE)) { ++t->drops; ++t->drop_tx_queue; return 0; }
     unsigned tail = (t->head + t->count) % XT_QUEUE;
     unsigned char *p = t->queue[tail].bytes;
     p[0] = 1; p[1] = (unsigned char)type; p[2] = p[3] = 0; put32(p+4, (uint32_t)n);
@@ -92,8 +101,10 @@ static int enqueue(Tunnel *t, unsigned type, const void *data, size_t n) {
     t->queue[tail].len = XT_HEADER + n; ++t->count; return 1;
 }
 static void queue_ready(Tunnel *t) {
-    unsigned char p[12] = {0}; put32(p, t->cfg->address); put32(p+4, t->cfg->peer_address);
-    p[8] = XT_MTU >> 8; p[9] = XT_MTU & 255;
+    unsigned char p[16] = {0}; put32(p, t->cfg->address); put32(p+4, t->cfg->peer_address);
+    p[8] = t->mtu_offer >> 8; p[9] = t->mtu_offer & 255;
+    p[10] = t->mtu_selected >> 8; p[11] = t->mtu_selected & 255;
+    p[12] = 1; /* MTU negotiation version; selected=0 until peer offer arrives */
     if (enqueue(t, READY, p, sizeof(p))) t->last_ready = t->now;
 }
 static int flush(Tunnel *t, unsigned budget) {
@@ -119,20 +130,34 @@ static int receive_messages(Tunnel *t) {
         }
         size_t n = (size_t)rc-XT_HEADER;
         if (p[1] == READY) {
-            if (n != 12 || be32(p+8) != t->cfg->peer_address || be32(p+12) != t->cfg->address ||
-                ((unsigned)p[16]<<8 | p[17]) != XT_MTU || p[18] || p[19]) {
+            if (n != 16 || be32(p+8) != t->cfg->peer_address || be32(p+12) != t->cfg->address ||
+                p[20] != 1 || p[21] || p[22] || p[23]) {
                 fputs("peer tunnel parameters mismatch\n", stderr); return 0;
             }
+            unsigned offer = (unsigned)p[16]<<8 | p[17];
+            unsigned confirmed = (unsigned)p[18]<<8 | p[19];
+            unsigned selected = offer < t->mtu_offer ? offer : t->mtu_offer;
+            if (offer < XT_MTU || offer > XT_MTU_MAX ||
+                (t->peer_offer && offer != t->peer_offer) || (confirmed && confirmed != selected)) {
+                fputs("peer MTU negotiation mismatch\n", stderr); return 0;
+            }
+            t->peer_offer = offer; t->mtu_selected = selected;
             t->last_rx = t->now;
             if (t->now - t->last_ready >= 500 || !t->active) queue_ready(t);
-            if (!t->active) {
+            if (!t->active && confirmed) {
+                char error[256];
+                if (!t->cfg->probe && !xt_device_set_mtu(t->dev, selected, error)) {
+                    fprintf(stderr, "MTU: %s\n", error); t->failed = 1; return 0;
+                }
+                t->cfg->mtu = selected;
                 if (!t->cfg->probe && !t->routes) {
                     char error[256];
                     if (!xt_device_routes(t->dev, t->cfg, error)) { fprintf(stderr, "routes: %s\n", error); t->failed = 1; return 0; }
                     t->routes = 1;
                 }
                 t->active = 1;
-                printf("READY %s mtu=%d\n", xdtls_suite(t->dtls), XT_MTU); fflush(stdout);
+                printf("READY %s mtu=%u local_offer=%u peer_offer=%u\n", xdtls_suite(t->dtls),
+                       selected, t->mtu_offer, t->peer_offer); fflush(stdout);
             }
         } else if (p[1] == DATA && t->active && !t->cfg->probe) {
             if (!xt_packet_valid(t->cfg, p+8, n, 1)) { ++t->drops; ++t->drop_ip; continue; }
@@ -154,6 +179,14 @@ static void reset(Tunnel *t) {
     /* Also cancel a wakeup armed by the best-effort close_notify. */
     (void)xudp_wait_writable(t->udp, false);
     t->count = t->head = 0; t->active = t->pong = 0;
+    t->mtu_offer = t->peer_offer = t->mtu_selected = 0;
+    if (t->cfg->mtu != XT_MTU) {
+        char error[256];
+        if (t->dev && !xt_device_set_mtu(t->dev, XT_MTU, error)) {
+            fprintf(stderr, "MTU reset: %s\n", error); t->failed = 1;
+        }
+        t->cfg->mtu = XT_MTU;
+    }
 }
 static void print_live_stats(Tunnel *t, uint64_t start) {
     xUdpStats udp = {0};
@@ -202,9 +235,11 @@ static int udp_buffer_size(SOCKET_T fd, int option, int request) {
     return value;
 }
 int xt_run(const XtConfig *cfg) {
+    XtConfig effective = *cfg; effective.mtu = XT_MTU;
+    cfg = &effective;
     Tunnel *t = calloc(1, sizeof(*t));
     if (!t) return 1;
-    t->cfg = cfg; t->now = xt_now();
+    t->cfg = &effective; t->now = xt_now();
     uint64_t start = t->now, retry_at = start;
     uint64_t stats_period = (uint64_t)cfg->stats_interval * 1000;
     uint64_t next_stats = start + stats_period;
@@ -256,6 +291,13 @@ int xt_run(const XtConfig *cfg) {
                 fprintf(stderr, "session reset: error=%d\n", xdtls_last_error(t->dtls));
                 reset(t); retry_at = t->now+1000;
             } else if (step == 1) {
+                if (!t->mtu_offer) {
+                    size_t payload = xdtls_max_payload(t->dtls);
+                    t->mtu_offer = xt_mtu_offer(payload, cfg->mtu_limit);
+                    printf("MTU_OFFER dtls_payload=%zu header=%d ceiling=%u offer=%u\n",
+                           payload, XT_HEADER, cfg->mtu_limit, t->mtu_offer); fflush(stdout);
+                    if (!t->mtu_offer) { fputs("DTLS payload too small for inner MTU\n", stderr); t->failed = 1; break; }
+                }
                 if (!t->active && t->now-t->last_ready >= 1000) queue_ready(t);
                 /* Complete only the pending write before RX; submitting a new
                  * write here could block RX again even after recovery. */

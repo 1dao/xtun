@@ -12,7 +12,7 @@ not interoperate with WireGuard.
   and optional per-adapter DNS on Windows clients.
 - DTLS 1.2 restricted to ECDHE-PSK with ChaCha20-Poly1305 and X25519.
 - A unique, random 32-byte PSK and an expected identity for each peer.
-- 1280-byte inner MTU, authenticated parameter exchange, bounded receive and
+- Automatically negotiated inner MTU, authenticated parameter exchange, bounded receive and
   transmit queues, IPv4 checksum/length and source/destination authorization.
 - Normal-exit cleanup, idle detection, full-handshake session renewal.
 - A no-adapter `--probe` mode for testing the actual secure UDP transport.
@@ -148,6 +148,13 @@ are installed. Ctrl+C performs cleanup.
   a client defaults to an ephemeral port.
 - `session_seconds`: full-handshake renewal interval, 30..86400, default 3600.
 - `run_seconds`: optional bounded runtime, default 0 (until interrupted).
+- `mtu`: inner MTU ceiling, `0` (automatic, default) or `1280..1400`.
+  For a tagged client use `work.mtu=0` with the actual tag. After DTLS
+  handshaking, each end subtracts the 8-byte tunnel header from its actual
+  maximum DTLS payload and applies this ceiling. Both ends confirm the smaller
+  offer before enabling data and updating their adapters. `MTU_OFFER` and
+  `READY` log the calculation and selected value. Use `mtu=1280` to retain the
+  previous inner packet size. This is capacity negotiation, not path MTU discovery.
 - `stats_interval`: seconds between `LIVE_STATS` lines (0 disables, default).
   Set to 1 on both ends for diagnostics; for a tagged client use
   `work.stats_interval=1` with the actual tag. Counters are cumulative.
@@ -198,6 +205,8 @@ handshake loss/timeouts, wrong keys/identities, replay/tampering, reordering,
 send backpressure, receive bounds, IPv4 validation and address authorization.
 `python3 tests/config_test.py` checks CLI and configuration rejection paths
 without modifying the network.
+`python3 tests/mtu_test.py` checks automatic/unequal MTU ceilings and READY
+retries under deliberate packet loss over loopback UDP, without adapters/routes.
 
 On Linux as root, with `iproute2`, `nftables`, `ping` and Python 3 installed:
 
@@ -264,7 +273,12 @@ Each application message has an 8-byte header: version (u8, currently 1), type
 (u8), reserved flags (u16, zero), payload length (u32, big endian). Types are
 READY=1, DATA=2, PING=3, PONG=4 and CLOSE=5. DATA contains exactly one IPv4
 packet. READY carries the sender and expected peer IPv4 addresses (u32 each,
-network order), inner MTU (u16), and two zero bytes. PING/PONG carry eight
+network order), local MTU offer (u16), confirmed MTU (u16, initially zero),
+MTU negotiation version (u8, currently 1), and three zero bytes: 16 bytes total.
+The confirmed MTU must equal the smaller of the two offers. DATA is enabled
+only after receiving the peer's confirmation; READY is retried until then.
+Both ends must be updated: the older 12-byte READY format is rejected.
+PING/PONG carry eight
 opaque bytes; CLOSE has no payload. Control messages and unknown versions
 never reach the virtual adapter.
 
@@ -279,11 +293,14 @@ records; idle sessions expire after 60 seconds. Renewal has a brief packet
 loss window rather than seamless overlapping sessions. Default session
 resumption and renegotiation are disabled. Secrets are cleared on teardown.
 
-Adapter MTU is set to 1280; the OS handles normal IPv4 fragmentation/DF/ICMP
-behavior. The app does not reassemble inner fragments or implement PMTU
-discovery. Packets exceeding the configured inner MTU are dropped and counted.
-The DTLS datagram budget is 1400 bytes; paths requiring smaller outer packets
-need a later configurable MTU/PMTU implementation.
+Adapter MTU starts at 1280 and changes to the confirmed value before data is
+enabled. Session resets restore 1280 and the next handshake negotiates again.
+Buffers have a separate fixed 1400-byte inner-packet bound. The OS handles
+normal IPv4 fragmentation/DF/ICMP behavior; packets exceeding the negotiated
+inner MTU are dropped and counted. The DTLS datagram budget remains 1400 bytes
+(excluding outer UDP/IP headers). This does not probe the network path or
+guarantee fragmentation-free delivery. Smaller-path support, probe-based MTU
+increases and automatic fallback require a future path MTU implementation.
 
 Normal cleanup removes only resources created by the process. Forced process
 termination and host crashes are outside the initial recovery guarantee.
