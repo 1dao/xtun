@@ -340,9 +340,14 @@ static void burst_credit_test(void) {
     for (unsigned i=0;i<600;++i) {
         assert(enqueue(p.a,DATA,payload,sizeof(payload)) && flush(p.a,1));
         assert(xdtls_read(p.b->dtls,out,sizeof(out))==XT_HEADER+2+sizeof(payload));
-        if (!i) assert(p.a->arq->credit==initial+(XT_HEADER+2+sizeof(payload))/4);
+        assert(p.a->arq->credit==initial); /* sending originals alone mints no tokens */
     }
+    p.a->now+=1000; arq_budget_update(p.a);
+    assert(p.a->arq->credit==initial+ARQ_REPAIR_RATE_MIN);
+    assert(p.a->arq->repair_rate==600*(XT_HEADER+2+sizeof(payload))/4);
+    p.a->now+=1000; arq_budget_update(p.a);
     assert(p.a->arq->credit==ARQ_CREDIT_MAX);
+    assert(p.a->arq->repair_rate==ARQ_REPAIR_RATE_MIN);
     /* A quiet period earns enough credit for a burst larger than the old cap. */
     for (unsigned seq=1;seq<=100;++seq) {
         arq_request(p.a,(uint16_t)seq);
@@ -355,7 +360,29 @@ static void burst_credit_test(void) {
     p.a->arq->credit=ARQ_CREDIT_MAX; p.a->now+=ARQ_TTL;
     assert(flush(p.a,1) && p.a->arq->credit==ARQ_CREDIT_MAX);
     assert(!p.a->count && p.a->arq_retransmits==100);
-    finish(&p); puts("PASS larger earned burst allowance, unchanged quarter-rate earning and bounded expiry refund");
+    finish(&p); puts("PASS timed quarter-rate budget, idle recovery floor, bounded burst and expiry refund");
+}
+static void idle_budget_test(void) {
+    Pair p; init(&p);
+    unsigned char payload[XT_MTU]={0}, out[2048];
+    p.ab.drop=1;
+    assert(enqueue(p.a,DATA,payload,sizeof(payload)) && flush(p.a,1));
+    p.a->arq->credit=0;
+    arq_request(p.a,1);
+    assert(!p.a->count && p.a->arq->pending==1);
+    p.a->now+=57; arq_retry_deferred(p.a);
+    assert(!p.a->count && p.a->arq->pending==1);
+    ++p.a->now; arq_retry_deferred(p.a);
+    assert(p.a->count==1 && !p.a->arq->pending);
+    assert(p.a->arq_defer_wait_max==58 && flush(p.a,1));
+    assert(xdtls_read(p.b->dtls,out,sizeof(out))==XT_HEADER+2+sizeof(payload));
+    /* Fractional accrual is independent of how frequently the loop ticks. */
+    p.a->arq->credit=0; p.a->arq->credit_fraction=0;
+    for(unsigned i=0;i<1000;++i) { ++p.a->now; arq_budget_update(p.a); }
+    assert(p.a->arq->credit==ARQ_REPAIR_RATE_MIN);
+    p.a->now+=1000000000; arq_budget_update(p.a);
+    assert(p.a->arq->credit==ARQ_CREDIT_MAX && !p.a->arq->credit_fraction);
+    finish(&p); puts("PASS exhausted repair budget recovers without originals, fractional refill and long-idle cap");
 }
 static void wait_stats_test(void) {
     Pair p; init(&p);
@@ -538,6 +565,6 @@ int main(void) {
     encrypted_order_test();
     independent_batch_test(); long_recovery_test();
     timer_test(); recovery_test(); priority_test(); reorder_test(); watermark_test(); wrap_test(); bounds_test(); queued_test(); batch_test();
-    burst_credit_test(); wait_stats_test(); logging_test(); ping_sampling_test(); feedback_rtt_test();
+    burst_credit_test(); idle_budget_test(); wait_stats_test(); logging_test(); ping_sampling_test(); feedback_rtt_test();
     puts("ALL ARQ TESTS PASSED"); return 0;
 }

@@ -394,11 +394,16 @@ Control traffic does not extend the active sampling period.
 Repairs overtake unsent DATA while preserving original and repair FIFO order;
 an outstanding DTLS write is always completed unchanged. Requests blocked by
 the local byte budget or queue are retained and retried when resources permit,
-within the same cache/window and expiry limits. Repair messages have a plaintext byte budget of 25% of
-original message bytes plus an initial allowance of four maximum MTUs. Earned
-credit can accumulate up to 128 maximum MTUs to absorb short loss bursts;
-this does not change the 25% earning rate. Control and DTLS/UDP/IP
-overhead are additional. Memory per enabled peer is bounded at roughly 1.5 MiB.
+within the same cache/window and expiry limits. Repairs use a time-refilled byte
+token bucket. Once per second, its refill rate is updated to 25% of the original
+plaintext message rate measured over the preceding interval, with a minimum
+of 16 maximum MTUs per second (22,400 B/s). This recovery floor continues when
+original traffic stalls. The bucket starts with four maximum MTUs and holds at
+most 128 maximum MTUs (179,200 bytes), so idle credit cannot grow without bound.
+Successful original sends update the rate measurement but do not directly mint
+tokens. The recovery floor may exceed 25% at low original rates. Control and
+DTLS/UDP/IP overhead are additional. ARQ_STATS includes repair_credit (bytes)
+and repair_rate_Bps. Memory remains bounded by the existing fixed ARQ rings.
 `ARQ_STATS` reports deferred repair wait counts in disjoint millisecond ranges
 0–10, 11–50, 51–100, 101–250, 251–500 and over 500, plus `defer_wait_sum_ms`.
 These cumulative counts cover deferred requests that successfully entered the

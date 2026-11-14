@@ -23,6 +23,7 @@ _Static_assert(ARQ_WINDOW < 32768u && (65536u % ARQ_WINDOW) == 0,
 #define ARQ_RESEND_GAP 100u /* fallback until an authenticated PONG gives RTT */
 #define ARQ_REPAIR_LIMIT 32u /* covers legitimate 200ms retries throughout the 5s lifetime */
 #define ARQ_CREDIT_MAX (128u*XT_MTU_MAX)
+#define ARQ_REPAIR_RATE_MIN (16u*XT_MTU_MAX) /* bytes/s: recovery continues when originals stop */
 #define ARQ_MARK_INTERVAL 200u
 #define ARQ_BATCH 512u /* 1024-byte feedback payload fits even the minimum MTU */
 typedef struct {
@@ -51,6 +52,9 @@ typedef struct {
     int ping_wait;
     int timer, timer_logged, schedule_dirty, nack_queued, mark_queued;
     size_t credit;
+    uint64_t credit_at, rate_at, original_bytes, repair_rate;
+    unsigned credit_fraction;
+    int budget_started;
     ArqRx rx[ARQ_WINDOW];
     ArqTx tx[ARQ_WINDOW];
 } Arq;
@@ -266,6 +270,36 @@ static void arq_pop(Tunnel *t) {
 /* Repairs overtake unsent DATA, preserving original and repair FIFO order.
  * Never move a record whose DTLS write is already in progress. Controls at
  * the head retain priority; the existing repair byte budget bounds bursts. */
+static void arq_budget_update(Tunnel *t) {
+    Arq *a=t->arq;
+    if (!a) return;
+    if (!a->budget_started) {
+        a->budget_started=1; a->credit_at=a->rate_at=t->now;
+        a->repair_rate=ARQ_REPAIR_RATE_MIN;
+        return;
+    }
+    uint64_t elapsed=t->now-a->credit_at;
+    if (elapsed) {
+        /* Cap before multiplication, including long idle periods. Fractional
+         * bytes survive frequent calls, but excess credit never accumulates. */
+        uint64_t fill_ms=((uint64_t)ARQ_CREDIT_MAX*1000+a->repair_rate-1)/a->repair_rate;
+        if (elapsed>=fill_ms) {
+            a->credit=ARQ_CREDIT_MAX; a->credit_fraction=0;
+        } else {
+            uint64_t amount=elapsed*a->repair_rate+a->credit_fraction;
+            uint64_t credit=a->credit+amount/1000;
+            a->credit=credit>ARQ_CREDIT_MAX ? ARQ_CREDIT_MAX : (size_t)credit;
+            a->credit_fraction=a->credit==ARQ_CREDIT_MAX ? 0 : (unsigned)(amount%1000);
+        }
+        a->credit_at=t->now;
+    }
+    uint64_t period=t->now-a->rate_at;
+    if (period>=1000) {
+        uint64_t rate=a->original_bytes*1000/period/4;
+        a->repair_rate=rate>ARQ_REPAIR_RATE_MIN ? rate : ARQ_REPAIR_RATE_MIN;
+        a->original_bytes=0; a->rate_at=t->now;
+    }
+}
 static void arq_prioritize_repair(Tunnel *t) {
     if (!t->arq || t->count<2 || t->queue[t->head].retry ||
         t->queue[t->head].bytes[1]!=ARQ_DATA || xdtls_write_pending(t->dtls)) return;
@@ -331,8 +365,8 @@ static int flush(Tunnel *t, unsigned budget) {
                 cached->retries = cached->queued = 0; cached->len = n-XT_HEADER;
                 memcpy(cached->bytes, t->queue[head].bytes+XT_HEADER, cached->len);
                 a->last_data = t->now;
-                a->credit += n/4; /* at most 25% extra bytes plus a small burst */
-                if (a->credit > ARQ_CREDIT_MAX) a->credit = ARQ_CREDIT_MAX;
+                arq_budget_update(t);
+                a->original_bytes += n;
             }
         }
         if (p[1] == ARQ_NACK) {
@@ -459,6 +493,7 @@ static void arq_try_repair(Tunnel *t, ArqTx *c, int from_nack) {
     uint16_t seq=(uint16_t)c->seq;
     if (t->now-c->born>=ARQ_TTL) { arq_defer_clear(t,c,"ttl"); return; }
     if (c->queued || c->retries>=ARQ_REPAIR_LIMIT || t->now<c->retry_at) return;
+    arq_budget_update(t);
     size_t cost = XT_HEADER+c->len;
     unsigned reason=t->count>=XT_QUEUE-4 ? 1 : t->arq->credit<cost ? 2 : 0;
     if (reason) {
@@ -546,6 +581,7 @@ static void ping_tick(Tunnel *t) {
 static void arq_tick(Tunnel *t) {
     Arq *a = t->arq;
     if (!a) return;
+    arq_budget_update(t);
     arq_drain(t, 0);
     arq_retry_deferred(t);
     if (a->sent && !a->mark_queued && t->now-a->last_data < ARQ_TTL &&
@@ -696,14 +732,16 @@ static void print_arq_stats(Tunnel *t) {
     printf(" expired_ttl=%llu expired_window=%llu cache_absent=%llu cache_expired=%llu "
            "deferred=%llu deferred_queued=%llu deferred_expired=%llu defer_wait_max_ms=%llu "
            "cooldown_skip=%llu queue_skip=%llu retry_limit_skip=%llu "
-           "pending=%u rtt_ms=%u cooldown_ms=%u",
+           "pending=%u rtt_ms=%u cooldown_ms=%u repair_credit=%zu repair_rate_Bps=%llu",
            (unsigned long long)t->arq_expired_ttl,(unsigned long long)t->arq_expired_window,
            (unsigned long long)t->arq_cache_absent,(unsigned long long)t->arq_cache_ttl,
            (unsigned long long)t->arq_deferred,(unsigned long long)t->arq_deferred_queued,
            (unsigned long long)t->arq_deferred_expired,(unsigned long long)t->arq_defer_wait_max,
            (unsigned long long)t->arq_cooldown_skip,(unsigned long long)t->arq_queue_skip,
            (unsigned long long)t->arq_retry_skip,t->arq ? t->arq->pending : 0,
-           t->arq ? t->arq->srtt : 0,t->arq ? arq_cooldown(t->arq) : 0);
+           t->arq ? t->arq->srtt : 0,t->arq ? arq_cooldown(t->arq) : 0,
+           t->arq ? t->arq->credit : 0,
+           (unsigned long long)(t->arq ? t->arq->repair_rate : 0));
     printf(" defer_wait_sum_ms=%llu defer_wait_0_10_ms=%llu defer_wait_11_50_ms=%llu "
            "defer_wait_51_100_ms=%llu defer_wait_101_250_ms=%llu "
            "defer_wait_251_500_ms=%llu defer_wait_gt500_ms=%llu "
