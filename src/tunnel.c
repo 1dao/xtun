@@ -28,6 +28,8 @@ typedef struct {
     uint64_t born, feedback_due;
     unsigned delay;
     int received, expired, requested, gap;
+    size_t len;
+    unsigned char bytes[XT_MTU_MAX];
 } ArqRx;
 typedef struct {
     uint32_t seq;
@@ -38,6 +40,8 @@ typedef struct {
 } ArqTx;
 typedef struct {
     uint32_t next, sent, high;
+    uint32_t delivered;
+    unsigned buffered;
     uint64_t last_data, last_rx_data, last_mark, nack_due, last_feedback;
     unsigned missing, cursor;
     unsigned pending, repair_cursor, srtt, last_rtt;
@@ -92,6 +96,7 @@ typedef struct {
     unsigned peer_arq;
     Arq *arq;
     uint64_t arq_nacks, arq_requests, arq_retransmits, arq_recovered, arq_duplicates;
+    uint64_t arq_order_waits, arq_order_skips;
     uint64_t arq_expired, arq_cache_miss, arq_limited;
     uint64_t arq_expired_ttl, arq_expired_window, arq_cache_absent, arq_cache_ttl;
     uint64_t arq_deferred, arq_deferred_queued, arq_deferred_expired, arq_defer_wait_max;
@@ -359,7 +364,35 @@ static int flush(Tunnel *t, unsigned budget) {
     }
     return 1;
 }
-/* No delivery queue: received packets can pass immediately, even with gaps. */
+/* Force only packets about to leave the bounded ring; otherwise wait for gaps
+ * until the existing repair TTL. Receipt and delivery have separate cursors. */
+static void arq_drain(Tunnel *t, uint32_t through) {
+    Arq *a = t->arq;
+    if (!a || !t->dev) return;
+    while (a->delivered < a->high) {
+        uint32_t seq = a->delivered + 1;
+        ArqRx *r = &a->rx[seq % ARQ_WINDOW];
+        if (r->seq != seq) { t->failed = 1; return; }
+        int forced = seq <= through;
+        if (!r->received) {
+            if (!forced && !r->expired && t->now-r->born < ARQ_TTL) break;
+            if (!r->expired) {
+                r->expired = 1; --a->missing; ++t->arq_expired;
+                if (forced) ++t->arq_expired_window; else ++t->arq_expired_ttl;
+                a->schedule_dirty = 1;
+            }
+            ++t->arq_order_skips;
+            arq_log(t,"order_skip","seq=%u reason=%s",(uint16_t)seq,forced ? "window" : "ttl");
+        } else if (r->len) {
+            if (xt_device_write(t->dev, r->bytes, r->len) <= 0) {
+                if (!forced && t->now-r->born < ARQ_TTL) break;
+                ++t->drops; ++t->drop_tun_write;
+            } else { ++t->rx_packets; t->rx_bytes += r->len; }
+            r->len = 0; --a->buffered;
+        }
+        a->delivered = seq;
+    }
+}
 static int arq_advance(Tunnel *t, uint16_t wire, uint32_t *logical, int watermark) {
     Arq *a = t->arq;
     unsigned delta = (uint16_t)(wire-(uint16_t)a->high);
@@ -368,6 +401,7 @@ static int arq_advance(Tunnel *t, uint16_t wire, uint32_t *logical, int watermar
          * safely. A new DTLS session resets both directions and rejects old data. */
         if (delta >= ARQ_WINDOW) return -1;
         uint32_t seq = a->high+delta, previous=a->high;
+        if (seq >= ARQ_WINDOW) arq_drain(t, seq-ARQ_WINDOW);
         unsigned evicted=0;
         for (uint32_t i = a->high+1; i <= seq; ++i) {
             ArqRx *r = &a->rx[i % ARQ_WINDOW];
@@ -394,6 +428,7 @@ static int arq_receive(Tunnel *t, uint16_t wire, int delivered) {
     uint32_t seq; int rc = arq_advance(t, wire, &seq, 0);
     if (rc <= 0) return rc;
     ArqRx *r = &t->arq->rx[seq % ARQ_WINDOW];
+    if (seq <= t->arq->delivered) { ++t->arq_duplicates; return 0; }
     if (r->received) { ++t->arq_duplicates; arq_log(t,"duplicate","seq=%u logical_seq=%u",wire,seq); return 0; }
     if (delivered) {
         if (r->requested) ++t->arq_recovered; /* gap filled, possibly by a late original */
@@ -404,6 +439,19 @@ static int arq_receive(Tunnel *t, uint16_t wire, int delivered) {
                                           wire,seq,r->requested,(unsigned long long)(t->now-r->born),t->arq->missing);
         if (!t->arq->missing) arq_timer_cancel(t,"gap_filled");
     }
+    return 1;
+}
+static int arq_store_packet(Tunnel *t, uint16_t wire, const void *ip, size_t len) {
+    int accepted = arq_receive(t, wire, 0);
+    if (accepted <= 0) return accepted;
+    uint32_t seq = t->arq->high - (uint16_t)((uint16_t)t->arq->high-wire);
+    ArqRx *r = &t->arq->rx[seq % ARQ_WINDOW];
+    memcpy(r->bytes, ip, len); r->len = len;
+    ++t->arq->buffered;
+    if (seq != t->arq->delivered+1) ++t->arq_order_waits;
+    /* Buffered packets are received, even while delivery waits for a gap. */
+    arq_receive(t, wire, 1);
+    arq_drain(t, 0);
     return 1;
 }
 /* Only retain unserved requests blocked by local resources. A NACK inside
@@ -485,6 +533,7 @@ static void ping_tick(Tunnel *t) {
 static void arq_tick(Tunnel *t) {
     Arq *a = t->arq;
     if (!a) return;
+    arq_drain(t, 0);
     arq_retry_deferred(t);
     if (a->sent && !a->mark_queued && t->now-a->last_data < ARQ_TTL &&
         t->now-a->last_mark >= ARQ_MARK_INTERVAL && t->count < XT_QUEUE-2) {
@@ -564,12 +613,12 @@ static int receive_messages(Tunnel *t) {
             t->last_rx = t->now;
             if (sequenced) {
                 t->arq->last_rx_data = t->now;
-                int accepted = arq_receive(t, be16(p+8), 0);
+                int accepted = arq_store_packet(t, be16(p+8), ip, ip_len);
                 if (accepted < 0) {
                     arq_log(t,"resync","trigger=data seq=%u high=%u",be16(p+8),(uint16_t)t->arq->high);
                     fputs("ARQ sequence outside receive window; resync\n", stderr); return 0;
                 }
-                if (!accepted) continue;
+                continue;
             }
             if (xt_device_write(t->dev, ip, ip_len) > 0) {
                 ++t->rx_packets; t->rx_bytes += ip_len;
@@ -644,11 +693,14 @@ static void print_arq_stats(Tunnel *t) {
            t->arq ? t->arq->srtt : 0,t->arq ? arq_cooldown(t->arq) : 0);
     printf(" defer_wait_sum_ms=%llu defer_wait_0_10_ms=%llu defer_wait_11_50_ms=%llu "
            "defer_wait_51_100_ms=%llu defer_wait_101_250_ms=%llu "
-           "defer_wait_251_500_ms=%llu defer_wait_gt500_ms=%llu\n",
+           "defer_wait_251_500_ms=%llu defer_wait_gt500_ms=%llu "
+           "order_buffered=%u order_waits=%llu order_skips=%llu\n",
            (unsigned long long)t->arq_defer_wait_sum,
            (unsigned long long)t->arq_defer_wait_bins[0],(unsigned long long)t->arq_defer_wait_bins[1],
            (unsigned long long)t->arq_defer_wait_bins[2],(unsigned long long)t->arq_defer_wait_bins[3],
-           (unsigned long long)t->arq_defer_wait_bins[4],(unsigned long long)t->arq_defer_wait_bins[5]);
+           (unsigned long long)t->arq_defer_wait_bins[4],(unsigned long long)t->arq_defer_wait_bins[5],
+           t->arq ? t->arq->buffered : 0,
+           (unsigned long long)t->arq_order_waits,(unsigned long long)t->arq_order_skips);
 }
 static void print_live_stats(Tunnel *t, uint64_t start) {
     xUdpStats udp = {0};

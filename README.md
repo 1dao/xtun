@@ -185,6 +185,15 @@ are installed. Ctrl+C performs cleanup.
   clients use e.g. `work.arq=0`. An older binary that does not recognize the
   ARQ capability must be upgraded or the updated peer must set `arq=0`.
   Start with `mtu=1280` when comparing performance.
+  ARQ receivers buffer out-of-order IP packets and deliver them to the virtual
+  adapter in sequence after gaps are repaired. Buffered packets are not requested
+  again. The receive ring holds at most 1024 packets (about 1.4 MiB of additional
+  payload storage per session). An unrepaired gap is skipped after the existing
+  1000 ms recovery deadline, or when it must leave the bounded window; later
+  arrivals for skipped sequences are discarded. Adapter write backpressure is
+  retried within the same deadline. This ordering is tunnel-wide, so a gap can
+  temporarily delay other flows. ARQ_STATS reports order_buffered, order_waits,
+  and order_skips for pending packets, out-of-order arrivals, and skipped gaps.
 - `arq_log`: `0` (default) or `1`. Enable on both ends for short diagnostics;
   tagged clients use e.g. `work.arq_log=1`. This is independent of `stats_interval`.
   `ARQ_EVENT` lines include wall-clock seconds, monotonic milliseconds, direction

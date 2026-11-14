@@ -1,4 +1,5 @@
 /* Include the owner to test its real queue/timer state without test-only APIs. */
+#define xt_device_write test_device_write
 #include "../src/tunnel.c"
 #include <assert.h>
 #ifdef _WIN32
@@ -9,6 +10,58 @@
 #else
 #include <unistd.h>
 #endif
+
+static unsigned char delivered_bytes[ARQ_WINDOW * 2];
+static unsigned delivered_count;
+static int delivery_blocked;
+int test_device_write(XtDevice *dev, const void *bytes, size_t n) {
+    (void)dev;
+    if (delivery_blocked) return 0;
+    assert(delivered_count < sizeof(delivered_bytes));
+    delivered_bytes[delivered_count++] = *(const unsigned char *)bytes;
+    return (int)n;
+}
+
+static void ordered_delivery_test(void) {
+    XtConfig cfg = {0};
+    Tunnel *t = calloc(1, sizeof(*t)); assert(t);
+    t->cfg = &cfg; t->arq = calloc(1, sizeof(Arq)); assert(t->arq);
+    t->dev = (XtDevice *)t; t->now = 10000;
+    delivered_count = 0;
+    assert(arq_store_packet(t, 2, "B", 1) == 1);
+    assert(!delivered_count && t->arq->buffered == 1 && t->arq->missing == 1);
+    assert(arq_store_packet(t, 2, "B", 1) == 0);
+    assert(arq_store_packet(t, 1, "A", 1) == 1);
+    assert(delivered_count == 2 && !memcmp(delivered_bytes,"AB",2));
+    assert(!t->arq->buffered && !t->arq->missing);
+    assert(arq_store_packet(t, 4, "D", 1) == 1);
+    t->now += ARQ_TTL-1; arq_drain(t,0); assert(delivered_count == 2);
+    ++t->now; arq_drain(t,0);
+    assert(delivered_count == 3 && delivered_bytes[2] == 'D' && t->arq_order_skips == 1);
+    assert(arq_store_packet(t, 3, "C", 1) == 0);
+    delivery_blocked = 1;
+    assert(arq_store_packet(t, 5, "E", 1) == 1 && delivered_count == 3);
+    delivery_blocked = 0; arq_drain(t,0);
+    assert(delivered_count == 4 && delivered_bytes[3] == 'E');
+    /* Filling the ring must drain before overwriting queued payloads. */
+    for (unsigned i=7; i<=ARQ_WINDOW+6; ++i) {
+        unsigned char byte=(unsigned char)i;
+        assert(arq_store_packet(t,(uint16_t)i,&byte,1)==1);
+    }
+    assert(t->arq->delivered == ARQ_WINDOW+6 && !t->arq->buffered && t->arq_order_skips == 2);
+    memset(t->arq,0,sizeof(*t->arq)); delivered_count=0;
+    t->arq->high=t->arq->delivered=65534;
+    assert(arq_store_packet(t,0,"B",1)==1 && !delivered_count);
+    assert(arq_store_packet(t,65535,"A",1)==1);
+    assert(delivered_count==2 && !memcmp(delivered_bytes,"AB",2) && t->arq->delivered==65536);
+    delivery_blocked=1;
+    assert(arq_store_packet(t,1,"C",1)==1);
+    t->now+=ARQ_TTL; arq_drain(t,0);
+    assert(!t->arq->buffered && t->drop_tun_write==1 && delivered_count==2);
+    delivery_blocked=0;
+    free(t->arq); free(t);
+    puts("PASS ordered delivery, deduplication, timeout, local retry and ring eviction");
+}
 
 typedef struct {
     Tunnel *t, *peer;
@@ -48,6 +101,30 @@ static void init(Pair *p) {
 static void finish(Pair *p) {
     xdtls_destroy(p->a->dtls); xdtls_destroy(p->b->dtls);
     free(p->a->arq); free(p->b->arq); free(p->a); free(p->b);
+}
+static void encrypted_order_test(void) {
+    Pair p; init(&p);
+    p.cb.probe=0; p.cb.full_tunnel=1;
+    p.cb.local_count=1; p.cb.local_networks[0]=(XtRoute){0};
+    p.b->dev=(XtDevice *)p.b;
+    unsigned char packet[20]={0x45,0,0,20,0,0,0,0,64,6,0,0,192,0,2,1,10,0,0,2};
+    unsigned sum=0;
+    for(unsigned i=0;i<20;i+=2) sum+=((unsigned)packet[i]<<8)|packet[i+1];
+    while(sum>>16) sum=(sum&65535)+(sum>>16);
+    packet[10]=(unsigned char)(~sum>>8); packet[11]=(unsigned char)~sum;
+    delivered_count=0;
+    p.ab.drop=1;
+    assert(enqueue(p.a,DATA,packet,sizeof(packet)) && flush(p.a,XT_QUEUE));
+    assert(enqueue(p.a,DATA,packet,sizeof(packet)) && flush(p.a,XT_QUEUE));
+    assert(receive_messages(p.b));
+    assert(!delivered_count && p.b->arq->buffered==1 && p.b->arq->missing==1);
+    p.b->now+=5; arq_tick(p.b); assert(flush(p.b,XT_QUEUE));
+    assert(receive_messages(p.a)); assert(flush(p.a,XT_QUEUE));
+    assert(receive_messages(p.b));
+    assert(delivered_count==2 && p.b->rx_packets==2 && p.b->rx_bytes==40);
+    assert(!p.b->arq->buffered && !p.b->arq->missing && p.b->arq->delivered==2);
+    finish(&p);
+    puts("PASS real DTLS receive path holds later IP packet until repair arrives");
 }
 static void send_data(Tunnel *t) {
     assert(enqueue(t,DATA,"packet",6)); assert(flush(t,XT_QUEUE));
@@ -414,6 +491,8 @@ static void ping_sampling_test(void) {
     finish(&p); puts("PASS immediate RTT probe, 1s bidirectional activity sampling and 20s idle keepalive");
 }
 int main(void) {
+    ordered_delivery_test();
+    encrypted_order_test();
     timer_test(); recovery_test(); priority_test(); reorder_test(); watermark_test(); wrap_test(); bounds_test(); queued_test(); batch_test();
     burst_credit_test(); wait_stats_test(); logging_test(); ping_sampling_test(); feedback_rtt_test();
     puts("ALL ARQ TESTS PASSED"); return 0;
