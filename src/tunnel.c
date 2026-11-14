@@ -715,6 +715,7 @@ int xt_run(const XtConfig *cfg) {
     uint64_t start = t->now, retry_at = start;
     uint64_t stats_period = (uint64_t)cfg->stats_interval * 1000;
     uint64_t next_stats = start + stats_period;
+    uint64_t next_gui_stats = start + 1000;
     char error[256]; int rc = 1;
     int tun_watched = 0;
 #ifndef _WIN32
@@ -791,6 +792,13 @@ int xt_run(const XtConfig *cfg) {
                     if (!flush(t, XT_QUEUE)) { reset(t); retry_at = t->now+1000; }
                 }
             }
+        }
+        if (cfg->managed && t->now >= next_gui_stats) {
+            printf("GUI_TRAFFIC elapsed_ms=%llu up=%llu down=%llu\n",
+                   (unsigned long long)(t->now - start),
+                   (unsigned long long)t->tx_bytes, (unsigned long long)t->rx_bytes);
+            fflush(stdout);
+            next_gui_stats = t->now + 1000;
         }
         if (stats_period && t->now >= next_stats) {
             print_live_stats(t, start);

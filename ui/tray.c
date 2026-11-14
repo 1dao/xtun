@@ -60,7 +60,11 @@ int ui_tray_init(void *window, int chinese) {
     icon.uID = TRAY_ICON_ID;
     icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     icon.uCallbackMessage = WM_TRAYICON;
-    icon.hIcon = (HICON)SendMessageW(tray_window, WM_GETICON, ICON_SMALL, 0);
+    /* GLFW's resource icon may be a class icon, so WM_GETICON can return NULL. */
+    icon.hIcon = (HICON)LoadImageW(GetModuleHandleW(NULL), L"GLFW_ICON", IMAGE_ICON,
+                                  GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON),
+                                  LR_SHARED);
+    if (!icon.hIcon) icon.hIcon = (HICON)SendMessageW(tray_window, WM_GETICON, ICON_SMALL, 0);
     if (!icon.hIcon) icon.hIcon = LoadIconW(NULL, (LPCWSTR)IDI_APPLICATION);
     lstrcpyW(icon.szTip, L"XTun");
     icon_added = Shell_NotifyIconW(NIM_ADD, &icon);

@@ -24,13 +24,14 @@ enum ConnectionState { DISCONNECTED, CONNECTING, CONNECTED, RECONNECTING, STOPPI
     X(REMOVE_OPTIONS, "移除;取消", "Remove;Cancel") \
     X(SWITCH, "切换连接", "Switch connection") \
     X(DETAILS, "隧道信息", "Tunnel details") \
+    X(UPLOAD, "上行", "Upload") \
+    X(DOWNLOAD, "下行", "Download") \
     X(SERVER, "服务器地址", "Server endpoint") \
     X(ADDRESS, "本地隧道地址", "Local tunnel address") \
     X(PEER, "对端隧道地址", "Peer tunnel address") \
     X(MODE, "路由模式", "Routing mode") \
     X(SPLIT, "IPv4 分流", "IPv4 split tunnel") \
     X(FULL, "IPv4 全局", "IPv4 full tunnel") \
-    X(ONE, "一次连接一个配置", "One active connection") \
     X(AUTORUN, "开机启动", "Start at sign-in") \
     X(AUTORUN_ERROR, "无法保存开机启动设置。", "Could not save the startup setting.") \
     X(TRAY_ERROR, "托盘图标创建失败，关闭窗口将退出 XTun。", "Tray unavailable. Closing the window will exit XTun.") \
@@ -50,6 +51,7 @@ enum ConnectionState { DISCONNECTED, CONNECTING, CONNECTED, RECONNECTING, STOPPI
     X(FOLLOW, "跟随最新日志", "Follow latest") \
     X(COPY, "复制日志", "Copy log") \
     X(ADMIN, "请以管理员身份运行 XTun。", "Run XTun as administrator to connect.") \
+    X(ADMIN_STATE, "请以管理员运行", "Run as administrator") \
     X(CHECK_LOG, "请查看运行日志了解详情。", "See the client log for details.") \
     X(FILE_ERROR, "无法读取所选配置文件的路径。", "Cannot use the selected configuration path.") \
     X(START_LOG, "正在启动 XTun 客户端。", "Starting XTun client.") \
@@ -126,6 +128,29 @@ static int line_count, log_scroll;
 static bool follow_log = true;
 static bool cleanup_failed;
 static enum ConnectionState state = DISCONNECTED;
+static unsigned long long traffic_ms, traffic_up, traffic_down;
+static double upload_rate, download_rate, traffic_received;
+
+static int consume_traffic(const char *line) {
+    if (strncmp(line, "GUI_TRAFFIC ", 12)) return 0;
+    unsigned long long ms, up, down;
+    if (sscanf(line, "GUI_TRAFFIC elapsed_ms=%llu up=%llu down=%llu", &ms, &up, &down) == 3 &&
+        ms > traffic_ms && up >= traffic_up && down >= traffic_down) {
+        double seconds = (ms - traffic_ms) / 1000.0;
+        upload_rate = (up - traffic_up) / seconds;
+        download_rate = (down - traffic_down) / seconds;
+        traffic_ms = ms; traffic_up = up; traffic_down = down;
+        traffic_received = GetTime();
+    }
+    return 1;
+}
+
+static void traffic_caption(char *output, size_t size, const char *label, double rate) {
+    const char *unit = "B/s";
+    if (rate >= 1048576) { rate /= 1048576; unit = "MiB/s"; }
+    else if (rate >= 1024) { rate /= 1024; unit = "KiB/s"; }
+    snprintf(output, size, "%s  %.1f %s", label, rate, unit);
+}
 
 static void log_line(const char *line) {
     snprintf(lines[next_line], LINE_SIZE, "%s", line);
@@ -141,7 +166,7 @@ static void consume(const char *data, int stopping) {
             if (!stopping && !strncmp(partial, "READY ", 6)) state = CONNECTED;
             if (!stopping && !strncmp(partial, "session reset:", 14)) state = RECONNECTING;
             if (!strncmp(partial, "route cleanup failed:", 21)) cleanup_failed = true;
-            log_line(partial);
+            if (!consume_traffic(partial)) log_line(partial);
             partial_len = 0;
         } else if (partial_len < sizeof(partial) - 1) {
             partial[partial_len++] = *data;
@@ -161,7 +186,7 @@ static void draw_log(Rectangle bounds) {
     EndScissorMode();
     if (log_scroll < last) follow_log = false;
 
-    GuiCheckBox((Rectangle){bounds.x + 98, bounds.y - 28, 16, 16}, text[TXT_FOLLOW], &follow_log);
+    GuiCheckBox((Rectangle){bounds.x, bounds.y - 28, 16, 16}, text[TXT_FOLLOW], &follow_log);
     if (!line_count) GuiDisable();
     if (GuiButton((Rectangle){bounds.x + bounds.width - 96, bounds.y - 32, 96, 24}, text[TXT_COPY])) {
         char clipboard[LOG_LINES * (LINE_SIZE + 1) + 1];
@@ -247,7 +272,7 @@ static enum Action sidebar(int width, int height, int modal) {
     DrawLineEx((Vector2){plus.x + 8, plus.y + 15}, (Vector2){plus.x + 22, plus.y + 15}, 2, teal);
     DrawLineEx((Vector2){plus.x + 15, plus.y + 8}, (Vector2){plus.x + 15, plus.y + 22}, 2, teal);
 
-    int visible = (height - 154) / 63;
+    int visible = (height - 87) / 63;
     int last = profile_count > visible ? profile_count - visible : 0;
     Rectangle region = {12, 75, width - 24, visible * 63};
     Vector2 mouse = GetMousePosition();
@@ -286,15 +311,6 @@ static enum Action sidebar(int width, int height, int modal) {
         if (thumb < 16) thumb = 16;
         DrawRectangle(width - 8, 75 + (track - thumb) * profile_scroll / last, 3, thumb, rule);
     }
-    if (menu_profile >= 0) GuiDisable();
-    bool requested = autorun;
-    GuiCheckBox((Rectangle){20, height - 60, 16, 16}, text[TXT_AUTORUN], &requested);
-    if (requested != autorun) {
-        if (ui_set_autorun(requested)) autorun = requested;
-        else autorun_error = true;
-    }
-    if (menu_profile >= 0) GuiEnable();
-    caption(text[TXT_ONE], 20, height - 27, 15, muted);
     if (open >= 0) {
         int y = 75 + (open - profile_scroll) * 63 + 44;
         if (y + 70 > height) y -= 102;
@@ -320,6 +336,18 @@ static enum Action sidebar(int width, int height, int modal) {
 static enum Action workspace(int left, int width, int height, int admin, int locked, bool *log_open) {
     int x = left + 24, w = width - x - 24;
     int footer = height - 33;
+    int option_width = 16 + GuiGetStyle(CHECKBOX, TEXT_PADDING) +
+                       (int)MeasureTextEx(GuiGetFont(), text[TXT_AUTORUN],
+                                          GuiGetStyle(DEFAULT, TEXT_SIZE),
+                                          GuiGetStyle(DEFAULT, TEXT_SPACING)).x;
+    if (locked) GuiDisable();
+    bool requested = autorun;
+    GuiCheckBox((Rectangle){x + w - 15 - option_width, 64, 16, 16}, text[TXT_AUTORUN], &requested);
+    if (requested != autorun) {
+        if (ui_set_autorun(requested)) autorun = requested;
+        else autorun_error = true;
+    }
+    GuiEnable();
     if (selected < 0) {
         caption(text[TXT_EMPTY], x, 36, 28, ink);
         caption(text[TXT_EMPTY_HINT], x, 83, 17, muted);
@@ -332,14 +360,14 @@ static enum Action workspace(int left, int width, int height, int admin, int loc
 
     enum ConnectionState visible_state = active == selected ? state :
         (active < 0 && selected == failed ? CLIENT_ERROR : DISCONNECTED);
-    Color dot = visible_state == CONNECTED ? active_color :
+    Color dot = !admin ? (Color){173, 113, 24, 255} : visible_state == CONNECTED ? active_color :
                 visible_state == CLIENT_ERROR ? (Color){180, 56, 56, 255} :
                 visible_state == DISCONNECTED ? muted : (Color){173, 113, 24, 255};
     Color banner = visible_state == CONNECTED ? (Color){226, 242, 237, 255} :
                                                 (Color){241, 246, 247, 255};
     round_box((Rectangle){x, 93, w, 66}, 0.20f, banner);
     DrawCircle(x + 17, 115, 5, dot);
-    caption(text[visible_state], x + 29, 103, 21, ink);
+    clipped_caption(text[admin ? (int)visible_state : TXT_ADMIN_STATE], x + 29, 103, w - 187, 21, ink);
     clipped_caption(mode(info), x + 29, 131, w - 187, 15, muted);
     if (locked || pending >= 0 || state == STOPPING ||
         (active != selected && (!admin || !info->available))) GuiDisable();
@@ -357,11 +385,17 @@ static enum Action workspace(int left, int width, int height, int admin, int loc
         clipped_caption(*values[i] ? values[i] : "-", x + 155, y + 6, w - 155, 16, ink);
     }
     DrawLine(x, 324, x + w, 324, rule);
+    int live = active == selected && state == CONNECTED && GetTime() - traffic_received < 3;
+    char upload[80], download[80];
+    traffic_caption(upload, sizeof(upload), text[TXT_UPLOAD], live ? upload_rate : 0);
+    traffic_caption(download, sizeof(download), text[TXT_DOWNLOAD], live ? download_rate : 0);
+    clipped_caption(upload, x, 338, w/2 - 8, 16, ink);
+    clipped_caption(download, x + w/2, 338, w/2, 16, ink);
 
-    if (GuiButton((Rectangle){x, 342, w, 29}, "")) *log_open = !*log_open;
-    caption(*log_open ? "v" : ">", x + 12, 348, 16, teal);
-    caption(text[TXT_LOG], x + 31, 348, 16, ink);
-    if (*log_open) draw_log((Rectangle){x, 408, w, footer - 416});
+    if (GuiButton((Rectangle){x, 378, w, 29}, "")) *log_open = !*log_open;
+    caption(*log_open ? "v" : ">", x + 12, 384, 16, teal);
+    caption(text[TXT_LOG], x + 31, 384, 16, ink);
+    if (*log_open) draw_log((Rectangle){x, 444, w, footer - 452});
     return action;
 }
 
@@ -369,6 +403,8 @@ static void start_profile(int index) {
     char output[256];
     unsigned long error = 0;
     partial_len = 0;
+    traffic_ms = traffic_up = traffic_down = 0;
+    upload_rate = download_rate = traffic_received = 0;
     if (ui_start(profiles[index].tag, &error)) {
         active = index;
         failed = -1;

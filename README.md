@@ -86,7 +86,11 @@ closing the window stops the client and exits instead. A background client
 error restores the window and opens the log. Expand the log
 panel to see or copy recent client messages.
 
-Enable **Start at sign-in** in the sidebar to open the GUI automatically when
+Tunnel details show upload and download rates, updated once per second while
+connected. These count inner IP traffic, excluding outer UDP/DTLS overhead,
+and continue updating while the window is hidden in the tray.
+
+Enable **Start at sign-in** above the connection button to open the GUI automatically when
 the current Windows user signs in. This uses the current user's Run registry
 entry (`xtun-gui`) and remembers the configuration working directory used when
 enabled. Disable the checkbox to remove the entry. Startup opens the interface;

@@ -20,7 +20,9 @@ static int load_tags(XtTag tags[XT_TAG_LIMIT]) {
         DWORD attributes = GetFileAttributesA(config_path);
         return attributes == INVALID_FILE_ATTRIBUTES && GetLastError() == ERROR_FILE_NOT_FOUND ? 0 : -1;
     }
-    int count = xt_config_tags(config_path, tags);
+    /* Removing the last profile writes tags=; this is a valid empty GUI list. */
+    const char *explicit_tags = xargs_get("tags");
+    int count = explicit_tags && !*explicit_tags ? 0 : xt_config_tags(config_path, tags);
     xargs_cleanup();
     return count;
 }
