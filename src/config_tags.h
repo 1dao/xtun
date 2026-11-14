@@ -41,6 +41,37 @@ static inline int xt_parse_tags(const char *value, XtTag tags[XT_TAG_LIMIT]) {
     return -1;
 }
 
+/* xargs has no ordered key iterator. Inspect assignment keys only, using the
+ * same whitespace/comment rules, without interpreting dots in field values. */
+static inline int xt_config_tags(const char *path, XtTag tags[XT_TAG_LIMIT]) {
+    const char *explicit_tags = xargs_get("tags");
+    if (explicit_tags) return *explicit_tags ? xt_parse_tags(explicit_tags, tags) : -1;
+    FILE *file = fopen(path, "r");
+    if (!file) return -1;
+    char line[4096]; int count = 0;
+    while (fgets(line, sizeof(line), file)) {
+        if (!strchr(line, '\n') && !feof(file)) { count = -1; break; }
+        char *key = line;
+        while (*key == ' ' || *key == '\t') ++key;
+        if (*key == '#' || !*key) continue;
+        char *end = strchr(key, '=');
+        if (!end) continue;
+        while (end > key && (end[-1] == ' ' || end[-1] == '\t')) --end;
+        char *dot = memchr(key, '.', (size_t)(end-key));
+        if (!dot) continue;
+        if (dot == key || dot+1 == end || (size_t)(dot-key) >= XT_TAG_SIZE ||
+            memchr(dot+1, '.', (size_t)(end-dot-1))) { count = -1; break; }
+        *dot = 0;
+        if (!xt_tag_valid(key)) { count = -1; break; }
+        if (xt_find_tag(tags, count, key) >= 0) continue;
+        if (count == XT_TAG_LIMIT) { count = -1; break; }
+        strcpy(tags[count++], key);
+    }
+    if (ferror(file)) count = -1;
+    fclose(file);
+    return count;
+}
+
 static inline const char *xt_cfg_value(const char *tag, const char *field) {
     char key[96];
     if (!tag) return xargs_get(field);

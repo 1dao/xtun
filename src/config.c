@@ -73,7 +73,7 @@ static int read_fields(XtConfig *c, const char *tag) {
     uint32_t bind;
     if (!field_string(tag, "bind", c->bind_ip, sizeof(c->bind_ip), "0.0.0.0") ||
         !field_string(tag, "endpoint", c->remote_ip, sizeof(c->remote_ip), "") ||
-        !field_string(tag, "identity", c->identity, sizeof(c->identity), NULL) ||
+        !field_string(tag, "identity", c->identity, sizeof(c->identity), "xtun_client") ||
         !field_string(tag, "name", c->name, sizeof(c->name), "xtun0") ||
         !field_string(tag, "address", local, sizeof(local), NULL) ||
         !field_string(tag, "peer_address", peer, sizeof(peer), NULL) ||
@@ -83,7 +83,7 @@ static int read_fields(XtConfig *c, const char *tag) {
         !field_number(tag, "session_seconds", &c->session_seconds, 3600, 30, 86400) ||
         !field_number(tag, "stats_interval", &c->stats_interval, 0, 0, 3600) ||
         !field_number(tag, "mtu", &c->mtu_limit, 0, 0, XT_MTU_MAX) ||
-        !field_number(tag, "arq", &c->arq, 0, 0, 1) ||
+        !field_number(tag, "arq", &c->arq, 1, 0, 1) ||
         !field_number(tag, "arq_log", &c->arq_log, 0, 0, 1)) return 0;
     if (c->mtu_limit && c->mtu_limit < XT_MTU) return 0;
     c->mtu = XT_MTU;
@@ -95,10 +95,15 @@ static int read_fields(XtConfig *c, const char *tag) {
         if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
               (*p >= '0' && *p <= '9') || *p == '_' || *p == '-')) return 0;
 
+    c->full_tunnel = 0;
+#ifdef _WIN32
+    c->full_tunnel = !c->server;
+#endif
     const char *full = xt_cfg_value(tag, "full_tunnel");
     if (full) {
         if (!strcmp(full, "true") || !strcmp(full, "1")) c->full_tunnel = 1;
-        else if (strcmp(full, "false") && strcmp(full, "0")) return 0;
+        else if (!strcmp(full, "false") || !strcmp(full, "0")) c->full_tunnel = 0;
+        else return 0;
     }
 #ifndef _WIN32
     if (c->full_tunnel) return 0;
@@ -127,11 +132,11 @@ int xt_load_config(XtConfig *c, const char *path, const char *tag) {
     }
     const char *tag_list = xargs_get("tags");
     XtTag tags[XT_TAG_LIMIT];
-    int count = xt_parse_tags(tag_list, tags);
-    if (tag_list || tag) {
+    int count = xt_config_tags(path, tags);
+    if (tag_list || tag || count != 0) {
         if (!c->server && !tag && count == 1) tag = tags[0];
         if (c->server || !tag || count <= 0 || xt_find_tag(tags, count, tag) < 0) {
-            fputs("invalid or missing client tag (use --tag TAG from the CFG tags list)\n", stderr);
+            fputs("invalid or missing client tag (use --tag TAG from the configured client groups)\n", stderr);
             xargs_cleanup();
             return 0;
         }

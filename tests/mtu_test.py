@@ -16,15 +16,23 @@ BIN = Path(os.environ.get("XTUN_BIN", str(ROOT / "bin" / ("xtun.exe" if os.name 
 def main():
     cases = [(0,0,False,0,0), (0,1280,False,0,0), (1300,1320,False,0,0),
              (1400,0,False,0,0), (0,0,True,0,0), (0,0,False,1,1),
-             (1280,1280,False,1,1), (0,0,False,1,0), (0,0,True,1,1)]
+             (1280,1280,False,1,1), (0,0,False,1,0), (0,0,True,1,1),
+             (0,0,False,None,None), (0,0,False,None,0), (0,0,False,0,None)]
     for client_limit, server_limit, loss, client_arq, server_arq in cases:
         with tempfile.TemporaryDirectory(prefix="mtu-", dir=ROOT / "build") as folder:
+            client_setting = "" if client_arq is None else f"arq={client_arq}\n"
+            server_setting = "" if server_arq is None else f"arq={server_arq}\n"
+            expected_arq = int(client_arq != 0 and server_arq != 0)
             folder = Path(folder)
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
                 sock.bind(("127.0.0.1", 0))
                 port = sock.getsockname()[1]
             common = f"identity=mtu-test\npsk={secrets.token_hex(32)}\nrun_seconds=8\n"
-            (folder / "server.cfg").write_text(common + f"port={port}\nbind=127.0.0.1\naddress=10.77.0.1\npeer_address=10.77.0.2\nmtu={server_limit}\narq={server_arq}\n")
+            if client_arq is None or server_arq is None:
+                common = common.replace("identity=mtu-test\n", "")
+                if client_arq is None and server_arq == 0:
+                    client_setting += "identity=xtun_client\n"
+            (folder / "server.cfg").write_text(common + f"port={port}\nbind=127.0.0.1\naddress=10.77.0.1\npeer_address=10.77.0.2\nmtu={server_limit}\n" + server_setting)
             relay = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             relay.bind(("127.0.0.1", 0)); relay.settimeout(.05)
             stop = threading.Event(); dropped = [0, 0]
@@ -42,7 +50,7 @@ def main():
             thread = threading.Thread(target=forward)
             if loss: thread.start()
             client_port = relay.getsockname()[1] if loss else port
-            (folder / "client.cfg").write_text(common + f"port={client_port}\nendpoint=127.0.0.1\naddress=10.77.0.2\npeer_address=10.77.0.1\nmtu={client_limit}\narq={client_arq}\n")
+            (folder / "client.cfg").write_text(common + f"port={client_port}\nendpoint=127.0.0.1\naddress=10.77.0.2\npeer_address=10.77.0.1\nmtu={client_limit}\n" + client_setting)
             with open(folder / "server.log", "w+") as log:
                 server = subprocess.Popen([str(BIN), "server", "--probe"], cwd=folder, stdout=log, stderr=subprocess.STDOUT)
                 try:
@@ -64,9 +72,9 @@ def main():
                         header = int(re.search(r"header=(\d+)", out)[1])
                         assert offer == min(payload - header, limit or 1400, 1400)
                         assert f"mtu={selected} " in out, out
-                        assert f"arq={client_arq & server_arq}" in out, out
+                        assert f"arq={expected_arq}" in out, out
                     if loss: assert sum(dropped) >= 2
-                    print(f"PASS ceilings={client_limit}/{server_limit} offers={offers} negotiated={selected} arq={client_arq & server_arq} dropped={dropped}")
+                    print(f"PASS ceilings={client_limit}/{server_limit} offers={offers} negotiated={selected} arq={expected_arq} dropped={dropped}")
                 finally:
                     if server.poll() is None: server.terminate()
                     server.wait(timeout=5)

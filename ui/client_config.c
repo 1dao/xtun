@@ -20,8 +20,7 @@ static int load_tags(XtTag tags[XT_TAG_LIMIT]) {
         DWORD attributes = GetFileAttributesA(config_path);
         return attributes == INVALID_FILE_ATTRIBUTES && GetLastError() == ERROR_FILE_NOT_FOUND ? 0 : -1;
     }
-    const char *value = xargs_get("tags");
-    int count = value ? xt_parse_tags(value, tags) : -1;
+    int count = xt_config_tags(config_path, tags);
     xargs_cleanup();
     return count;
 }
@@ -48,7 +47,7 @@ int client_configs_load(Profile profiles[PROFILE_LIMIT], ProfileInfo info[PROFIL
             snprintf(info[i].endpoint, sizeof(info[i].endpoint), "%s:%s", host, port ? port : "51215");
         if (address) snprintf(info[i].address, sizeof(info[i].address), "%s", address);
         if (peer) snprintf(info[i].peer, sizeof(info[i].peer), "%s", peer);
-        info[i].full = full && (!strcmp(full, "true") || !strcmp(full, "1"));
+        info[i].full = !full || !strcmp(full, "true") || !strcmp(full, "1");
         info[i].available = host && *host;
     }
     xargs_cleanup();

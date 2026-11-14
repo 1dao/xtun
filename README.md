@@ -8,15 +8,16 @@ not interoperate with WireGuard.
 ## Current scope
 
 - Windows 10/11 x64 and Linux x64, one tunnel and one peer per process.
-- Explicit IPv4 split routes by default, with opt-in IPv4 full tunneling
+- IPv4 full tunneling by default on Windows clients, with configurable split routes
   and optional per-adapter DNS on Windows clients.
 - DTLS 1.2 restricted to ECDHE-PSK with ChaCha20-Poly1305 and X25519.
-- A unique, random 32-byte PSK and an expected identity for each peer.
+- A unique, random 32-byte PSK and a matching identity (default `xtun_client`).
 - Automatically negotiated inner MTU, authenticated parameter exchange, bounded receive and
   transmit queues, IPv4 checksum/length and source/destination authorization.
 - Normal-exit cleanup, idle detection, full-handshake session renewal.
 - A no-adapter `--probe` mode for testing the actual secure UDP transport.
-- Optional bounded, unordered DATA recovery using batched NACKs (`arq=1`).
+- Bounded, unordered DATA recovery using batched NACKs (enabled by default;
+  disable with `arq=0`).
 
 The initial command-line version requires administrator/root access to create
 adapters and routes. Service installation, automatic crash recovery, IPv6,
@@ -111,12 +112,14 @@ between CIDRs. XTun uses the core CFG reader, which also checks same-name
 environment variables for settings omitted from the file. Convert existing
 Lua tables to CFG before starting the new binary.
 
-A client CFG can contain several connections. List the tags in order as
-`tags=work,personal` and prefix each connection's fields with its tag
+A client CFG can contain several connections. Prefix each connection's fields with its tag
 and a dot, for example `work.endpoint=192.0.2.2`. A tag is case-sensitive
 and contains up to 31 ASCII letters, digits, underscores or hyphens,
 with no leading hyphen. An optional `work.label` is the name shown in the
-GUI. Save Unicode labels as UTF-8 without a BOM.
+GUI. Save Unicode labels as UTF-8 without a BOM. If `tags` is omitted, the CLI
+and GUI discover groups from assignment-key prefixes in first-occurrence order.
+An explicit `tags=work,personal` overrides discovery and defines selection/order.
+Dots in values (such as IPv4 addresses) and commented fields do not define groups.
 
 Save the tagged configuration as `client.cfg` in your working directory:
 
@@ -157,11 +160,14 @@ are installed. Ctrl+C performs cleanup.
   offer before enabling data and updating their adapters. `MTU_OFFER` and
   `READY` log the calculation and selected value. Use `mtu=1280` to retain the
   previous inner packet size. This is capacity negotiation, not path MTU discovery.
-- `arq`: `0` (default) or `1`. Both updated peers must set `arq=1` to enable
-  recovery; tagged clients use e.g. `work.arq=1`. With only one updated peer
-  opting in, negotiation falls back to ordinary DATA. An older binary that
-  does not recognize the ARQ capability must be upgraded before opting in.
-  No change is needed in `core`. Start with `mtu=1280` when comparing performance.
+- `identity`: defaults to `xtun_client` on both ends when omitted. Explicit
+  values override the default and must match between peers; empty values are invalid.
+- `name`: local adapter name, defaults to `xtun0` when omitted.
+- `arq`: `1` (default) or `0`. Both peers offer recovery by default; set
+  `arq=0` on either peer to negotiate ordinary DATA without recovery. Tagged
+  clients use e.g. `work.arq=0`. An older binary that does not recognize the
+  ARQ capability must be upgraded or the updated peer must set `arq=0`.
+  Start with `mtu=1280` when comparing performance.
 - `arq_log`: `0` (default) or `1`. Enable on both ends for short diagnostics;
   tagged clients use e.g. `work.arq_log=1`. This is independent of `stats_interval`.
   `ARQ_EVENT` lines include wall-clock seconds, monotonic milliseconds, direction
@@ -208,8 +214,9 @@ script that tries several operations should return failure if any fail.
 IPv4 forwarding is still a system setting. The Linux integration test
 demonstrates these operations inside isolated network namespaces.
 
-For IPv4 full tunneling, set `full_tunnel=true` on the Windows client and
-omit `routes`. Keep `bind` unset or set to `0.0.0.0`. On the Linux server
+Windows clients default to `full_tunnel=true`; omit `routes` for this mode.
+Set `full_tunnel=false` explicitly to use split routes. Linux clients and servers
+default to `false`. Keep `bind` unset or set to `0.0.0.0`. On the Linux server
 set `local_networks=0.0.0.0/0` to authorize forwarding to arbitrary
 IPv4 destinations and receiving their replies. Configure Linux IP forwarding
 and NAT (or return routing) separately. The server still authorizes the

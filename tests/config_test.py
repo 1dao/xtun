@@ -18,7 +18,7 @@ def main():
         assert call("keygen",key).returncode!=0 and key.read_bytes()==original
         base=dict(endpoint="192.0.2.2",identity="test-peer",psk=original.decode(),address="10.77.0.2",peer_address="10.77.0.1")
         def check(changes,expected,mode="client"):
-            config=base|changes
+            config={k:v for k,v in (base|changes).items() if v is not None}
             def encode(value):
                 if isinstance(value,list): return ", ".join(value)
                 if isinstance(value,bool): return str(value).lower()
@@ -29,18 +29,20 @@ def main():
             assert (result.returncode==0)==expected,(changes,result.stdout,result.stderr)
             assert original.decode() not in result.stdout+result.stderr
         check({},True)
+        check({"identity":None},True)
+        check({"identity":None},True,"server")
         for mtu in (0, 1280, 1300, 1400): check({"mtu":mtu},True)
         for mtu in (-1, 1, 1279, 1401, "auto", "1300x"): check({"mtu":mtu},False)
         for arq in (0, 1): check({"arq":arq},True)
         for arq in (-1, 2, "true", "1x"): check({"arq":arq},False)
         for arq_log in (0, 1): check({"arq_log":arq_log},True)
         for arq_log in (-1, 2, "true", "1x"): check({"arq_log":arq_log},False)
-        check({"routes":["198.19.0.0/24", "203.0.113.0/24"]},True)
-        check({"routes":"198.19.0.0/24,"},False)
-        check({"routes":["0.0.0.0/0"]},False)
-        check({"routes":["192.0.2.0/24"]},False)
-        check({"routes":["10.77.0.0/24"]},False)
-        check({"routes":["198.19.0.1/24"]},False)
+        check({"full_tunnel":False,"routes":["198.19.0.0/24", "203.0.113.0/24"]},True)
+        check({"full_tunnel":False,"routes":"198.19.0.0/24,"},False)
+        check({"full_tunnel":False,"routes":["0.0.0.0/0"]},False)
+        check({"full_tunnel":False,"routes":["192.0.2.0/24"]},False)
+        check({"full_tunnel":False,"routes":["10.77.0.0/24"]},False)
+        check({"full_tunnel":False,"routes":["198.19.0.1/24"]},False)
         check({"address":"10.77.0.1"},False)
         check({"port":65536},False)
         check({"name":"bad;name"},False)
@@ -60,11 +62,31 @@ def main():
         check({"full_tunnel":True,"bind":"192.0.2.3"},False)
         check({"full_tunnel":True},False,"server")
         check({"full_tunnel":"sometimes"},False)
-        check({"dns":"1.1.1.1"},False)
+        check({"full_tunnel":False,"dns":"1.1.1.1"},False)
+        check({"dns":"1.1.1.1"},windows)
+        check({"routes":["198.19.0.0/24"]},not windows)
+        check({"full_tunnel":False},True)
         path = folder / "client.cfg"
         work = "".join(f"work.{k}={v}\n" for k, v in base.items())
         personal = "".join(f"personal.{k}={v}\n" for k, v in
                            (base | {"endpoint":"203.0.113.1", "psk":"invalid"}).items())
+        # Infer groups from keys, never from comments or dotted IPv4 values.
+        path.write_text("# ignored.endpoint=192.0.2.3\n" + work)
+        assert call("client", "--check").returncode == 0
+        assert call("client", "--tag", "work", "--check").returncode == 0
+        path.write_text(work + personal)
+        assert call("client", "--check").returncode != 0
+        assert call("client", "--tag", "work", "--check").returncode == 0
+        assert call("client", "--tag", "personal", "--check").returncode != 0
+        assert call("client", "--tag", "unknown", "--check").returncode != 0
+        path.write_text("tags=work\n" + work + personal)
+        assert call("client", "--check").returncode == 0
+        assert call("client", "--tag", "personal", "--check").returncode != 0
+        for key in ("bad!.endpoint", ".endpoint", "work.", "work.extra.endpoint"):
+            path.write_text(work + key + "=192.0.2.3\n")
+            assert call("client", "--check").returncode != 0
+        path.write_text(work + "".join(f"tag{i}.endpoint=192.0.2.3\n" for i in range(64)))
+        assert call("client", "--tag", "work", "--check").returncode != 0
         path.write_text("tags=work, personal\n" + work + personal)
         assert call("client", "--tag", "work", "--check").returncode == 0
         assert call("client", "--tag", "personal", "--check").returncode != 0
@@ -78,7 +100,7 @@ def main():
         path.write_text("tags=work,work\n" + work)
         assert call("client", "--tag", "work", "--check").returncode != 0
         # Untagged fields must never fill missing fields in the selected block.
-        path.write_text("tags=work\nidentity=test-peer\n" + work.replace("work.identity=test-peer\n", ""))
+        path.write_text("tags=work\nendpoint=192.0.2.2\n" + work.replace("work.endpoint=192.0.2.2\n", ""))
         assert call("client", "--tag", "work", "--check").returncode != 0
         path.write_text("tags=work\npsk=" + original.decode() + "\n" +
                         work.replace("work.psk=" + original.decode() + "\n", ""))
