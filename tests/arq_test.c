@@ -148,7 +148,7 @@ static void feedback(Tunnel *t) {
 static void timer_test(void) {
     Pair p; init(&p); Tunnel *b=p.b;
     assert(arq_receive(b,2,1)==1); assert(b->arq->missing==1);
-    const unsigned times[]={5,25,65,145,305,465};
+    const unsigned times[]={5,25,75,175,375,575};
     arq_tick(b); assert(b->arq->nack_due==10005 && !b->count);
     for (unsigned i=0;i<sizeof(times)/sizeof(times[0]);++i) {
         if (i) { b->now=10000+times[i]-1; arq_tick(b); assert(!b->count); }
@@ -171,7 +171,40 @@ static void timer_test(void) {
     unsigned before=p.ba.sent;
     assert(arq_receive(b,5,1)==1); assert(flush(b,XT_QUEUE));
     assert(p.ba.sent==before && !b->count && !b->arq->nack_queued);
-    finish(&p); puts("PASS 5ms grace, per-gap 20/40/80/160ms backoff, new-gap independence and cancellation");
+    finish(&p); puts("PASS 5ms grace, per-gap 20/50/100/200ms backoff, new-gap independence and cancellation");
+}
+static void independent_batch_test(void) {
+    Pair p; init(&p); Tunnel *b=p.b;
+    assert(arq_receive(b,2,1)==1 && arq_receive(b,4,1)==1);
+    b->now+=5; feedback(b); control(p.a);
+    assert(b->arq->rx[1].feedback_due==10025 && b->arq->rx[3].feedback_due==10025);
+    b->now=10025; feedback(b); control(p.a);
+    assert(b->arq->rx[1].feedback_due==10075 && b->arq->rx[3].feedback_due==10075);
+    b->now=10030; assert(arq_receive(b,1,1)==1);
+    assert(b->arq->rx[3].feedback_due==10075 && b->arq->rx[3].delay==100);
+    /* A fresh gap gets its first request without restarting the older gap. */
+    assert(arq_receive(b,6,1)==1); b->now=10035; feedback(b); control(p.a);
+    assert(b->arq->rx[5].feedback_due==10055 && b->arq->rx[3].feedback_due==10075);
+    b->now=10055; feedback(b); control(p.a);
+    assert(b->arq->rx[5].feedback_due==10105 && b->arq->rx[3].feedback_due==10075);
+    b->now=10075; feedback(b); control(p.a);
+    assert(b->arq->rx[3].feedback_due==10175 && b->arq->rx[5].feedback_due==10105);
+    finish(&p); puts("PASS batched gaps keep independent cooldowns after earlier gaps are repaired");
+}
+static void long_recovery_test(void) {
+    Pair p; init(&p);
+    p.ab.drop=1; send_data(p.a); send_data(p.a); assert(take_data(p.b,2)==1);
+    for (unsigned i=1;i<=21;++i) {
+        p.a->now=p.b->now=10000+i*200;
+        feedback(p.b); control(p.a);
+        assert(p.a->count==1);
+        p.ab.drop=i<21; assert(flush(p.a,XT_QUEUE));
+    }
+    assert(take_data(p.b,1)==1 && !p.b->arq->missing);
+    assert(p.a->arq_retransmits==21 && !p.a->arq_retry_skip);
+    p.a->now=10000+ARQ_TTL;
+    arq_request(p.a,1); assert(!p.a->count && p.a->arq_cache_ttl==1);
+    finish(&p); puts("PASS twenty lost repairs still recover after 4.2s, expiry remains bounded");
 }
 static void recovery_test(void) {
     Pair p; init(&p);
@@ -192,6 +225,7 @@ static void recovery_test(void) {
     assert(p.a->count==1 && flush(p.a,1)); assert(take_data(p.b,2)==1);
     assert(!p.b->arq->missing && !p.b->arq->timer && p.a->arq_retransmits==3);
     p.a->now+=160;
+    p.a->arq->tx[2].retries=ARQ_REPAIR_LIMIT;
     arq_request(p.a,2); assert(!p.a->count); /* actual retry limit */
     assert(p.a->arq_retry_skip==1);
     /* Fresh DTLS records can carry a duplicate app sequence, delivered once. */
@@ -417,7 +451,7 @@ static void logging_test(void) {
     assert(strstr(text,"trigger=data first=2 last=2 count=1"));
     assert(strstr(text,"trigger=watermark"));
     assert(strstr(text,"seqs=2 omitted=0"));
-    assert(strstr(text,"delay_ms=20") && strstr(text,"delay_ms=40"));
+    assert(strstr(text,"delay_ms=20") && strstr(text,"delay_ms=50"));
     assert(strstr(text,"reason=gap_filled") && strstr(text,"reason=expired"));
     assert(strstr(text,"side=server") && strstr(text,"mono_ms=") && strstr(text,"omitted=4"));
     assert(!strstr(text,"event=disabled") && !strstr(text,"packet"));
@@ -457,16 +491,14 @@ static unsigned timed_recovery(int sampled, int lose_repair) {
     finish(&p); return filled;
 }
 static void feedback_rtt_test(void) {
-    Arq a={0};
-    assert(arq_feedback_delay(&a,160)==160);
-    a.srtt=1; assert(arq_feedback_delay(&a,160)==20);
-    a.srtt=51; assert(arq_feedback_delay(&a,160)==26);
-    assert(arq_feedback_delay(&a,20)==20);
-    a.srtt=1000; assert(arq_feedback_delay(&a,160)==160);
-    assert(timed_recovery(0,1)==195);
-    assert(timed_recovery(1,1)==150);
+    assert(arq_next_feedback_delay(20)==50);
+    assert(arq_next_feedback_delay(50)==100);
+    assert(arq_next_feedback_delay(100)==200);
+    assert(arq_next_feedback_delay(200)==200);
+    assert(timed_recovery(0,1)==225);
+    assert(timed_recovery(1,1)==225);
     assert(timed_recovery(0,0)==55 && timed_recovery(1,0)==55);
-    puts("PASS RTT-bounded feedback: lost repair recovers in 150ms vs 195ms; healthy repair unchanged");
+    puts("PASS fixed per-gap feedback independent of RTT; healthy and lost-repair recovery");
 }
 static void ping_sampling_test(void) {
     Pair p; init(&p); Tunnel *a=p.a;
@@ -504,6 +536,7 @@ static void ping_sampling_test(void) {
 int main(void) {
     ordered_delivery_test();
     encrypted_order_test();
+    independent_batch_test(); long_recovery_test();
     timer_test(); recovery_test(); priority_test(); reorder_test(); watermark_test(); wrap_test(); bounds_test(); queued_test(); batch_test();
     burst_credit_test(); wait_stats_test(); logging_test(); ping_sampling_test(); feedback_rtt_test();
     puts("ALL ARQ TESTS PASSED"); return 0;

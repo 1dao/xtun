@@ -360,27 +360,31 @@ by one IPv4 packet; ARQ_NACK=7 contains up to 512 missing 16-bit sequences;
 ARQ_MARK=8 contains only the last successfully sent DATA sequence (16 bits).
 Each direction starts at 1, wraps through zero, and keeps its own sequence space.
 Repairs reuse the original application sequence but are encrypted into a fresh
-DTLS record. There are no positive ACKs and no global in-order delivery queue.
+DTLS record. There are no positive ACKs; the receiver buffers data for bounded
+in-order delivery to the adapter.
 
 The receiver gives each new gap a 5 ms reordering grace period before its first
-NACK. Each missing sequence then independently backs off through 20, 40, 80
-and at most 160 ms between requests, measured from successful feedback writes.
-Once RTT is sampled, each interval is additionally capped at half the smoothed
-RTT (rounded up and bounded to 20–160 ms). This reduces the wait for fresh feedback
-after the sender's repair cooldown ends; the sender still ignores early requests
-and never schedules an automatic repair from a stale NACK.
+NACK. Each missing sequence then independently backs off through 20, 50, 100
+and 200 ms between requests, repeating at 200 ms until receipt, expiry or window
+eviction. Intervals start at successful feedback writes, not queue insertion.
+RTT samples, new gaps and repair of other gaps do not reset this progress.
+The sender still ignores requests inside its repair cooldown and never
+schedules an automatic repair from a stale NACK.
 Only due sequences are batched, with at least 5 ms between feedback packets.
 A single timer tracks the earliest per-gap deadline, so new gaps do not inherit
 an older gap's long backoff. The gap-free path does not scan the receive window.
 An empty missing set cancels the timer. Queued feedback is refreshed before
 encryption without bypassing a newer gap's grace period; an outstanding DTLS write
 is always retried unchanged. Each sender advertises its watermark every 200 ms
-while it has sent DATA within the last second, repeating unchanged watermarks
+while it has sent DATA within the last five seconds, repeating unchanged watermarks
 to expose tail loss; idle connections stop advertising after that period.
 
 Recovery uses a fixed 8192-packet cache/window and a five-second eligibility
 limit, whichever is exhausted first. Only successfully sent originals enter
-the cache. Each packet can be repaired up to three times. The cooldown between
+the cache. Each packet can be repaired up to 32 times within that lifetime,
+so legitimate requests can still recover data after the first three repairs fail.
+The existing byte budget, queue bounds and cooldown still limit actual repairs.
+The cooldown between
 successful repairs uses 1.5 times the larger of the latest and smoothed PONG RTT,
 clamped to 20–500 ms; it defaults to 100 ms before an RTT sample is available.
 The first PING is queued immediately after session activation. With ARQ enabled,

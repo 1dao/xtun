@@ -58,10 +58,12 @@ ifeq ($(OS),Windows_NT)
 RAYLIB_ROOT ?= ../../ops/raylib
 RAYGUI_ROOT ?= ../../ops/raygui
 RAYLIB_STATIC ?= $(RAYLIB_ROOT)/src/libraylib.a
-WINDRES ?= windres
-$(BUILD)/ui/xtun-icon.o: ui/xtun.rc ui/xtun.ico
+# Match the compiler's resource tool, even when clang64 precedes mingw64 in PATH.
+CC_TOOL_PATH := $(shell command -v $(CC))
+WINDRES ?= $(dir $(CC_TOOL_PATH))windres
+$(BUILD)/ui/xtun-icon.o: ui/xtun.rc ui/xtun.ico Makefile
 	@mkdir -p $(BUILD)/ui
-	$(WINDRES) -Iui -i ui/xtun.rc -o $@
+	"$(WINDRES)" -J rc -O coff -Iui -i ui/xtun.rc -o $@
 gui: $(BIN_DIR)/xtun.exe $(BIN_DIR)/xtun-gui.exe $(BIN_DIR)/raygui-notices.txt
 $(BIN_DIR)/xtun-gui.exe: ui/client.c ui/process.c ui/process.h ui/tray.c ui/tray.h ui/client_config.c ui/client_config.h src/config.h $(BUILD)/app/config.o $(BUILD)/core/xargs.o $(BUILD)/ui/xtun-icon.o $(RAYLIB_STATIC) $(RAYGUI_ROOT)/src/raygui.h
 	@mkdir -p $(BIN_DIR)
