@@ -6,6 +6,9 @@
 #include "xtun.h"
 
 static char config_path[PROFILE_PATH];
+enum SaveFailure { SAVE_IDENTITY, SAVE_ENCODING, SAVE_TAGS, SAVE_TEMP, SAVE_WRITE, SAVE_FIELDS, SAVE_VALIDATE, SAVE_REPLACE };
+static enum SaveFailure save_failure;
+static DWORD save_windows_error;
 
 const char *client_config_path(void) { return config_path; }
 
@@ -99,6 +102,7 @@ static int write_tag_fields(FILE *file, const Profile *profile, char *body) {
 
 /* Rewrite just the tag list and one section, then validate before replacing. */
 static int update_config(const Profile *profile, char *body, int creating) {
+    save_failure = SAVE_TAGS;
     XtTag tags[XT_TAG_LIMIT];
     int count = load_tags(tags);
     if (count < 0) return 0;
@@ -111,7 +115,9 @@ static int update_config(const Profile *profile, char *body, int creating) {
     char *slash = strrchr(directory, '\\');
     if (!slash) return 0;
     *slash = 0;
+    save_failure = SAVE_TEMP;
     if (!GetTempFileNameA(directory, "xtc", 0, temp)) return 0;
+    save_failure = SAVE_WRITE;
     FILE *source = fopen(config_path, "rb");
     FILE *target = fopen(temp, "wb");
     int ok = target && (source || creating);
@@ -135,10 +141,23 @@ static int update_config(const Profile *profile, char *body, int creating) {
         if (ferror(source)) ok = 0;
         fclose(source);
     }
-    if (ok && body) ok = write_tag_fields(target, profile, body);
+    if (ok && body) {
+        save_failure = SAVE_FIELDS;
+        ok = write_tag_fields(target, profile, body);
+    }
     if (target && fclose(target)) ok = 0;
-    if (ok && body) ok = ui_check_config(temp, profile->tag);
-    if (ok) ok = MoveFileExA(temp, config_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    if (ok && body) {
+        save_failure = SAVE_VALIDATE;
+        ok = ui_check_config(temp, profile->tag);
+    }
+    if (ok) {
+        save_failure = SAVE_REPLACE;
+        /* ReplaceFile preserves the destination's ACL and file metadata. */
+        ok = ReplaceFileA(config_path, temp, NULL, 0, NULL, NULL);
+        if (!ok && GetLastError() == ERROR_FILE_NOT_FOUND)
+            ok = MoveFileExA(temp, config_path, MOVEFILE_WRITE_THROUGH);
+        if (!ok) save_windows_error = GetLastError();
+    }
     if (!ok) DeleteFileA(temp);
     return ok;
 }
@@ -187,6 +206,8 @@ static int editor_read(Editor *editor) {
     return ok && MultiByteToWideChar(CP_ACP, 0, body, -1, editor->source, CFG_LIMIT) != 0;
 }
 static int editor_save(Editor *editor) {
+    save_failure = SAVE_IDENTITY;
+    save_windows_error = 0;
     Profile updated = *editor->profile;
     WCHAR name[PROFILE_NAME], tag[XT_TAG_SIZE];
     GetWindowTextW(editor->name, name, PROFILE_NAME);
@@ -196,6 +217,7 @@ static int editor_save(Editor *editor) {
         !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, tag, -1, updated.tag, XT_TAG_SIZE, NULL, NULL) ||
         !xt_tag_valid(updated.tag)) return 0;
     GetWindowTextW(editor->cfg, editor->source, CFG_LIMIT);
+    save_failure = SAVE_ENCODING;
     char content[CFG_LIMIT];
     BOOL substituted = FALSE;
     int utf8 = GetACP() == CP_UTF8;
@@ -247,9 +269,40 @@ static LRESULT CALLBACK editor_proc(HWND window, UINT msg, WPARAM wp, LPARAM lp)
     }
     if (msg == WM_COMMAND && LOWORD(wp) == IDOK) {
         if (editor_save(editor)) { editor->saved = 1; DestroyWindow(window); }
-        else MessageBoxW(window, label(editor, L"无法保存。请检查配置名称、标签、CFG 字段和密钥。",
-                         L"Could not save. Check the name, tag, CFG fields, and PSK."),
-                         L"XTun", MB_OK | MB_ICONWARNING);
+        else {
+            static const WCHAR *const zh[] = {
+                L"配置名称或标签无效。名称不能为空，标签仅允许英文字母、数字、下划线和短横线。",
+                L"CFG 内容为空，过长，或包含当前系统编码无法表示的字符。",
+                L"无法读取配置列表，或当前标签不存在（新建时可能与已有标签重复）。",
+                L"无法在配置目录创建临时文件。请检查目录写入权限。",
+                L"无法完整读取或写入配置文件。请检查文件权限、磁盘空间和行长度。",
+                L"CFG 字段格式无效。每行应为 字段=值；编辑框中不要添加标签前缀，也不要填写 label。",
+                L"生成的配置未通过校验。请检查字段取值、地址、路由及 64 位十六进制密钥。",
+                L"无法替换 client.cfg。请检查文件是否只读、被占用，或缺少写入权限。"
+            };
+            static const WCHAR *const en[] = {
+                L"Invalid profile name or tag. Use a nonempty name and an ASCII letter/digit/underscore/hyphen tag.",
+                L"CFG text is empty, too long, or contains characters unavailable in the system encoding.",
+                L"Cannot read the profile list, find the current tag, or create a duplicate tag.",
+                L"Cannot create a temporary file in the configuration directory. Check write permissions.",
+                L"Cannot fully read or write the configuration. Check permissions, disk space, and line lengths.",
+                L"Invalid CFG field syntax. Use field=value without a tag prefix or label field.",
+                L"Configuration validation failed. Check field values, addresses, routes, and the 64-digit hexadecimal PSK.",
+                L"Cannot replace client.cfg. Check for a read-only file, file locks, or missing write permissions."
+            };
+            WCHAR message[1024], reason[256] = {0}, path[PROFILE_PATH] = {0};
+            const WCHAR *detail = editor->chinese ? zh[save_failure] : en[save_failure];
+            if (save_windows_error) {
+                FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                               NULL, save_windows_error, 0, reason, 256, NULL);
+                MultiByteToWideChar(CP_ACP, 0, config_path, -1, path, PROFILE_PATH);
+                swprintf(message, sizeof(message)/sizeof(*message), L"%ls\n\nWindows %lu: %ls\n%ls",
+                         detail, save_windows_error, reason, path);
+                detail = message;
+            }
+            MessageBoxW(window, detail,
+                        L"XTun", MB_OK | MB_ICONWARNING);
+        }
         return 0;
     }
     if (msg == WM_CLOSE || (msg == WM_COMMAND && LOWORD(wp) == IDCANCEL)) {
