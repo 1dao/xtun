@@ -58,10 +58,14 @@ ifeq ($(OS),Windows_NT)
 RAYLIB_ROOT ?= ../../ops/raylib
 RAYGUI_ROOT ?= ../../ops/raygui
 RAYLIB_STATIC ?= $(RAYLIB_ROOT)/src/libraylib.a
+WINDRES ?= windres
+$(BUILD)/ui/xtun-icon.o: ui/xtun.rc ui/xtun.ico
+	@mkdir -p $(BUILD)/ui
+	$(WINDRES) -Iui -i ui/xtun.rc -o $@
 gui: $(BIN_DIR)/xtun.exe $(BIN_DIR)/xtun-gui.exe $(BIN_DIR)/raygui-notices.txt
-$(BIN_DIR)/xtun-gui.exe: ui/client.c ui/process.c ui/process.h ui/tray.c ui/tray.h ui/client_config.c ui/client_config.h src/config.h $(BUILD)/app/config.o $(BUILD)/core/xargs.o $(RAYLIB_STATIC) $(RAYGUI_ROOT)/src/raygui.h
+$(BIN_DIR)/xtun-gui.exe: ui/client.c ui/process.c ui/process.h ui/tray.c ui/tray.h ui/client_config.c ui/client_config.h src/config.h $(BUILD)/app/config.o $(BUILD)/core/xargs.o $(BUILD)/ui/xtun-icon.o $(RAYLIB_STATIC) $(RAYGUI_ROOT)/src/raygui.h
 	@mkdir -p $(BIN_DIR)
-	$(CC) $(CPPFLAGS) $(filter-out -MMD -MP,$(CFLAGS)) -isystem "$(RAYLIB_ROOT)/src" -isystem "$(RAYGUI_ROOT)/src" -mwindows ui/client.c ui/process.c ui/tray.c ui/client_config.c $(BUILD)/app/config.o $(BUILD)/core/xargs.o "$(RAYLIB_STATIC)" -lopengl32 -lgdi32 -lwinmm -lshell32 -ladvapi32 -lws2_32 -o $@
+	$(CC) $(CPPFLAGS) $(filter-out -MMD -MP,$(CFLAGS)) -isystem "$(RAYLIB_ROOT)/src" -isystem "$(RAYGUI_ROOT)/src" -mwindows ui/client.c ui/process.c ui/tray.c ui/client_config.c $(BUILD)/app/config.o $(BUILD)/core/xargs.o $(BUILD)/ui/xtun-icon.o "$(RAYLIB_STATIC)" -lopengl32 -lgdi32 -lwinmm -lshell32 -ladvapi32 -lws2_32 -o $@
 $(BIN_DIR)/raygui-notices.txt: $(wildcard ui/vendor/*LICENSE.txt)
 	@mkdir -p $(BIN_DIR)
 	cat $^ > $@
@@ -73,4 +77,5 @@ clean:
 	$(RM) $(BUILD)/core/*.o $(BUILD)/core/*.d $(BUILD)/app/*.o $(BUILD)/app/*.d $(BUILD)/mbed/*.o $(BUILD)/mbed/*.d $(BUILD)/mbedtls.a $(BIN_DIR)/xtun$(EXT) $(BIN_DIR)/dtls_test$(EXT) $(BIN_DIR)/arq_test$(EXT)
 ifeq ($(OS),Windows_NT)
 	$(RM) $(BIN_DIR)/xtun-gui.exe $(BIN_DIR)/raygui-notices.txt $(BIN_DIR)/platform_windows_test.exe
+	$(RM) $(BUILD)/ui/xtun-icon.o
 endif

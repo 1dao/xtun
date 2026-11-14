@@ -1,0 +1,2 @@
+// GLFW loads this resource as the default window icon.
+GLFW_ICON ICON "xtun.ico"
