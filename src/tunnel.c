@@ -14,6 +14,8 @@
 enum { READY = 1, DATA, PING, PONG, CLOSE, ARQ_DATA, ARQ_NACK, ARQ_MARK };
 #define ARQ_WINDOW 1024u
 #define ARQ_TTL 1000u
+#define ARQ_REORDER 5u
+#define ARQ_FEEDBACK_GAP 5u
 #define ARQ_INITIAL 20u
 #define ARQ_BACKOFF_MAX 160u
 #define ARQ_RESEND_GAP 100u
@@ -21,7 +23,8 @@ enum { READY = 1, DATA, PING, PONG, CLOSE, ARQ_DATA, ARQ_NACK, ARQ_MARK };
 #define ARQ_BATCH 512u /* 1024-byte feedback payload fits even the minimum MTU */
 typedef struct {
     uint32_t seq;
-    uint64_t born;
+    uint64_t born, feedback_due;
+    unsigned delay;
     int received, expired, requested, gap;
 } ArqRx;
 typedef struct {
@@ -33,9 +36,9 @@ typedef struct {
 } ArqTx;
 typedef struct {
     uint32_t next, sent, high;
-    uint64_t last_data, last_mark, nack_due;
-    unsigned missing, delay, cursor;
-    int timer, timer_logged, nack_queued, mark_queued;
+    uint64_t last_data, last_mark, nack_due, last_feedback;
+    unsigned missing, cursor;
+    int timer, timer_logged, schedule_dirty, nack_queued, mark_queued;
     size_t credit;
     ArqRx rx[ARQ_WINDOW];
     ArqTx tx[ARQ_WINDOW];
@@ -108,7 +111,32 @@ static void arq_log_batch(Tunnel *t, const char *event, const unsigned char *seq
 static void arq_timer_cancel(Tunnel *t, const char *reason) {
     Arq *a=t->arq;
     if (a->timer) arq_log(t,"timer_cancel","reason=%s missing=%u",reason,a->missing);
-    a->timer=0; a->timer_logged=0;
+    a->timer=0; a->timer_logged=0; a->schedule_dirty=0;
+}
+/* Each missing sequence owns its grace/backoff deadline. This single cached
+ * minimum drives the event loop; no scan is needed on the gap-free path. */
+static void arq_timer_update(Tunnel *t) {
+    Arq *a=t->arq; uint64_t due=UINT64_MAX; unsigned expired=0;
+    for (unsigned i=0; i<ARQ_WINDOW; ++i) {
+        ArqRx *r=&a->rx[i];
+        if (!r->seq || r->received || r->expired) continue;
+        if (t->now-r->born >= ARQ_TTL) {
+            r->expired=1; --a->missing; ++t->arq_expired; ++expired; continue;
+        }
+        uint64_t next=r->feedback_due < r->born+ARQ_TTL ? r->feedback_due : r->born+ARQ_TTL;
+        if (next<due) due=next;
+    }
+    a->schedule_dirty=0;
+    if (expired) arq_log(t,"gap_expired","reason=ttl count=%u missing=%u",expired,a->missing);
+    if (!a->missing) { arq_timer_cancel(t,expired ? "expired" : "no_gaps"); return; }
+    if (a->last_feedback && due<a->last_feedback+ARQ_FEEDBACK_GAP) due=a->last_feedback+ARQ_FEEDBACK_GAP;
+    if (!a->timer || a->nack_due!=due) {
+        arq_log(t,a->timer ? "timer_arm" : "timer_start",
+                "delay_ms=%llu due_ms=%llu missing=%u",
+                (unsigned long long)(due>t->now ? due-t->now : 0),(unsigned long long)due,a->missing);
+        a->timer_logged=0;
+    }
+    a->timer=1; a->nack_due=due;
 }
 static int dtls_send(void *p, const unsigned char *data, size_t n) {
     Tunnel *t = p; int error;
@@ -173,16 +201,15 @@ static void queue_ready(Tunnel *t) {
     if (enqueue(t, READY, p, sizeof(p))) t->last_ready = t->now;
 }
 static unsigned arq_feedback(Tunnel *t, unsigned char *out) {
-    Arq *a = t->arq; unsigned count = 0, expired = 0;
+    Arq *a = t->arq; unsigned count = 0;
+    arq_timer_update(t);
+    if (!a->timer || t->now<a->nack_due) return 0;
     for (unsigned j = 0; j < ARQ_WINDOW; ++j) {
         ArqRx *r = &a->rx[(a->cursor+j)%ARQ_WINDOW];
-        if (!r->seq || r->received || r->expired) continue;
-        if (t->now-r->born >= ARQ_TTL) { r->expired=1; --a->missing; ++t->arq_expired; ++expired; continue; }
+        if (!r->seq || r->received || r->expired || t->now<r->feedback_due) continue;
         put16(out+2*count, (uint16_t)r->seq);
         if (++count == ARQ_BATCH) break;
     }
-    if (expired) arq_log(t,"gap_expired","reason=ttl count=%u missing=%u",expired,a->missing);
-    if (!a->missing) arq_timer_cancel(t,"expired");
     return count;
 }
 static void arq_pop(Tunnel *t) {
@@ -197,7 +224,7 @@ static int flush(Tunnel *t, unsigned budget) {
         if (p[1] == ARQ_NACK && !xdtls_write_pending(t->dtls)) {
             unsigned count = arq_feedback(t, p+XT_HEADER);
             if (!count) {
-                arq_log(t,"nack_cancel","reason=no_gaps");
+                arq_log(t,"nack_cancel","reason=no_due_gaps");
                 t->arq->nack_queued=0; arq_pop(t); continue;
             }
             put32(p+4, count*2); n = t->queue[head].len = XT_HEADER+count*2;
@@ -245,14 +272,14 @@ static int flush(Tunnel *t, unsigned budget) {
             arq_log_batch(t,"nack_sent",p+XT_HEADER,(unsigned)((n-XT_HEADER)/2));
             for (size_t j = XT_HEADER; j < n; j += 2) {
                 uint16_t seq = be16(p+j); ArqRx *r = &a->rx[seq%ARQ_WINDOW];
-                if (r->seq && (uint16_t)r->seq == seq) r->requested=1;
+                if (r->seq && (uint16_t)r->seq == seq && !r->received && !r->expired) {
+                    r->requested=1; r->feedback_due=t->now+r->delay;
+                    if (r->delay<ARQ_BACKOFF_MAX) r->delay*=2;
+                }
                 a->cursor=(seq+1u)%ARQ_WINDOW;
             }
-            a->nack_due=t->now+a->delay;
-            a->timer_logged=0;
-            if (a->timer) arq_log(t,"timer_arm","delay_ms=%u due_ms=%llu missing=%u",a->delay,
-                                 (unsigned long long)a->nack_due,a->missing);
-            if (a->delay < ARQ_BACKOFF_MAX) a->delay *= 2;
+            a->last_feedback=t->now;
+            arq_timer_update(t);
         }
         if (p[1] == ARQ_MARK) {
             arq_log(t,"mark_sent","seq=%u",be16(p+XT_HEADER));
@@ -276,9 +303,11 @@ static int arq_advance(Tunnel *t, uint16_t wire, uint32_t *logical, int watermar
         for (uint32_t i = a->high+1; i <= seq; ++i) {
             ArqRx *r = &a->rx[i % ARQ_WINDOW];
             if (r->seq && !r->received && !r->expired) { --a->missing; ++t->arq_expired; ++evicted; }
-            *r = (ArqRx){.seq=i, .born=t->now, .gap=watermark || i<seq}; ++a->missing;
+            *r = (ArqRx){.seq=i, .born=t->now, .feedback_due=t->now+ARQ_REORDER,
+                         .delay=ARQ_INITIAL, .gap=watermark || i<seq}; ++a->missing;
         }
         a->high = seq;
+        a->schedule_dirty=1;
         if (evicted) arq_log(t,"gap_expired","reason=window_evicted count=%u missing=%u",evicted,a->missing);
         unsigned gaps=delta-(watermark ? 0 : 1);
         if (gaps) arq_log(t,"gap_detect","trigger=%s first=%u last=%u count=%u logical_first=%u",
@@ -301,6 +330,7 @@ static int arq_receive(Tunnel *t, uint16_t wire, int delivered) {
         if (r->requested) ++t->arq_recovered; /* gap filled, possibly by a late original */
         r->received = 1;
         if (!r->expired) --t->arq->missing;
+        t->arq->schedule_dirty=1;
         if (r->gap || r->requested) arq_log(t,"gap_filled","seq=%u logical_seq=%u requested=%d age_ms=%llu missing=%u",
                                           wire,seq,r->requested,(unsigned long long)(t->now-r->born),t->arq->missing);
         if (!t->arq->missing) arq_timer_cancel(t,"gap_filled");
@@ -333,10 +363,8 @@ static void arq_tick(Tunnel *t) {
         if (enqueue(t, ARQ_MARK, mark, sizeof(mark))) a->mark_queued=1;
     }
     if (!a->missing) { arq_timer_cancel(t,"no_gaps"); return; }
-    if (!a->timer) {
-        a->timer=1; a->timer_logged=0; a->delay=ARQ_INITIAL; a->nack_due=t->now;
-        arq_log(t,"timer_start","due_ms=%llu missing=%u",(unsigned long long)a->nack_due,a->missing);
-    }
+    if (!a->timer || a->schedule_dirty || t->now>=a->nack_due) arq_timer_update(t);
+    if (!a->timer) return;
     if (t->now >= a->nack_due && !a->timer_logged) {
         arq_log(t,"timer_expire","due_ms=%llu late_ms=%llu missing=%u queue=%u",
                 (unsigned long long)a->nack_due,(unsigned long long)(t->now-a->nack_due),a->missing,t->count);

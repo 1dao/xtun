@@ -61,28 +61,38 @@ static int take_data(Tunnel *t, uint16_t expected) {
     return rc;
 }
 static void control(Tunnel *t) { assert(receive_messages(t)); }
-static void feedback(Tunnel *t) { arq_tick(t); assert(flush(t,XT_QUEUE)); }
+static void feedback(Tunnel *t) {
+    arq_tick(t);
+    if (t->arq->timer && t->now<t->arq->nack_due) { t->now=t->arq->nack_due; arq_tick(t); }
+    assert(flush(t,XT_QUEUE));
+}
 static void timer_test(void) {
     Pair p; init(&p); Tunnel *b=p.b;
     assert(arq_receive(b,2,1)==1); assert(b->arq->missing==1);
-    const unsigned times[]={0,20,60,140,300,460};
+    const unsigned times[]={5,25,65,145,305,465};
+    arq_tick(b); assert(b->arq->nack_due==10005 && !b->count);
     for (unsigned i=0;i<sizeof(times)/sizeof(times[0]);++i) {
         if (i) { b->now=10000+times[i]-1; arq_tick(b); assert(!b->count); }
         b->now=10000+times[i]; feedback(b); control(p.a);
         assert(b->arq_nacks==i+1 && b->arq->timer);
     }
-    /* A new gap joins the existing timer without postponing its deadline. */
+    /* A new gap gets its own grace period while old gaps keep their backoff. */
     uint64_t due=b->arq->nack_due;
-    assert(arq_receive(b,4,1)==1); arq_tick(b); assert(b->arq->nack_due==due);
+    assert(arq_receive(b,4,1)==1); arq_tick(b); assert(b->arq->nack_due==b->now+5);
+    assert(b->arq->rx[1].feedback_due==due);
+    uint64_t requests=p.a->arq_requests;
+    b->now+=5; feedback(b); control(p.a);
+    assert(p.a->arq_requests==requests+1 && b->arq->rx[3].requested);
+    assert(b->arq->rx[1].feedback_due==due && b->arq->rx[3].feedback_due==b->now+20);
     assert(arq_receive(b,1,1)==1 && arq_receive(b,3,1)==1);
     assert(!b->arq->missing && !b->arq->timer);
     b->now+=100; arq_tick(b); assert(!b->count);
     /* Resolve a gap while feedback is queued: cancel before encrypting it. */
-    assert(arq_receive(b,6,1)==1); arq_tick(b); assert(b->count==1);
+    assert(arq_receive(b,6,1)==1); b->now+=5; arq_tick(b); assert(b->count==1);
     unsigned before=p.ba.sent;
     assert(arq_receive(b,5,1)==1); assert(flush(b,XT_QUEUE));
     assert(p.ba.sent==before && !b->count && !b->arq->nack_queued);
-    finish(&p); puts("PASS immediate batched NACK, 20/40/80/160ms backoff, merge and cancellation");
+    finish(&p); puts("PASS 5ms grace, per-gap 20/40/80/160ms backoff, new-gap independence and cancellation");
 }
 static void recovery_test(void) {
     Pair p; init(&p);
@@ -109,6 +119,34 @@ static void recovery_test(void) {
     assert(!xdtls_feed(p.b->dtls,p.ab.cipher,p.ab.len));
     unsigned char out[2048]; assert(xdtls_read(p.b->dtls,out,sizeof(out))==XDTLS_AGAIN);
     finish(&p); puts("PASS lost NACK/lost repair recovery, write backpressure, cooldown, retry limit and deduplication");
+}
+static void reorder_test(void) {
+    Pair p; init(&p); Tunnel *b=p.b;
+    /* Repeated 1ms reordering must not emit any NACK or start a repair. */
+    for (unsigned seq=1; seq<1000; seq+=2) {
+        assert(arq_receive(b,(uint16_t)(seq+1),1)==1);
+        arq_tick(b); assert(!b->count && b->arq->nack_due==b->now+ARQ_REORDER);
+        ++b->now; assert(arq_receive(b,(uint16_t)seq,1)==1);
+        arq_tick(b); assert(!b->count && !b->arq->timer);
+        b->now+=9;
+    }
+    assert(!b->arq_nacks && !b->arq->missing);
+    finish(&p);
+    init(&p); b=p.b;
+    assert(arq_receive(b,2,1)==1); arq_tick(b);
+    b->now+=ARQ_REORDER-1; arq_tick(b); assert(!b->count);
+    ++b->now; arq_tick(b); assert(b->count==1);
+    /* A new gap appears while old feedback is queued. Refreshing that
+     * message must not request the younger gap before its own grace ends. */
+    assert(arq_receive(b,4,1)==1);
+    assert(flush(b,XT_QUEUE)); control(p.a);
+    assert(p.a->arq_requests==1 && b->arq->rx[1].requested && !b->arq->rx[3].requested);
+    assert(b->arq->nack_due==b->now+ARQ_REORDER);
+    uint64_t old_due=b->arq->rx[1].feedback_due;
+    b->now+=ARQ_REORDER; feedback(b); control(p.a);
+    assert(p.a->arq_requests==2 && b->arq->rx[3].requested);
+    assert(b->arq->rx[1].feedback_due==old_due && b->arq->nack_due==old_due);
+    finish(&p); puts("PASS 500 short reorders without NACK and queued feedback preserves new-gap grace");
 }
 static void watermark_test(void) {
     Pair p; init(&p); p.ab.drop=1; send_data(p.a);
@@ -155,7 +193,7 @@ static void bounds_test(void) {
 }
 static void queued_test(void) {
     Pair p; init(&p);
-    assert(arq_receive(p.b,2,1)==1); arq_tick(p.b);
+    assert(arq_receive(p.b,2,1)==1); p.b->now+=5; arq_tick(p.b);
     p.ba.block=1; assert(flush(p.b,1)); assert(xdtls_write_pending(p.b->dtls));
     unsigned char saved[XT_HEADER+2*ARQ_BATCH]; size_t len=p.b->queue[p.b->head].len;
     memcpy(saved,p.b->queue[p.b->head].bytes,len);
@@ -225,7 +263,7 @@ static void logging_test(void) {
     finish(&p); puts("PASS optional ARQ logs trace real recovery/timer events, bound previews and omit payloads");
 }
 int main(void) {
-    timer_test(); recovery_test(); watermark_test(); wrap_test(); bounds_test(); queued_test(); batch_test();
+    timer_test(); recovery_test(); reorder_test(); watermark_test(); wrap_test(); bounds_test(); queued_test(); batch_test();
     logging_test();
     puts("ALL ARQ TESTS PASSED"); return 0;
 }

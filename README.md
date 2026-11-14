@@ -319,10 +319,14 @@ Each direction starts at 1, wraps through zero, and keeps its own sequence space
 Repairs reuse the original application sequence but are encrypted into a fresh
 DTLS record. There are no positive ACKs and no global in-order delivery queue.
 
-The receiver batches a first NACK at the end of the receive pass when a gap
-appears, then repeats current gaps after 20, 40, 80 and at most 160 ms between
-feedback packets. New gaps merge into that timer; an empty missing set cancels
-it. Queued feedback is refreshed before encryption; an outstanding DTLS write
+The receiver gives each new gap a 5 ms reordering grace period before its first
+NACK. Each missing sequence then independently backs off through 20, 40, 80
+and at most 160 ms between requests, measured from successful feedback writes.
+Only due sequences are batched, with at least 5 ms between feedback packets.
+A single timer tracks the earliest per-gap deadline, so new gaps do not inherit
+an older gap's long backoff. The gap-free path does not scan the receive window.
+An empty missing set cancels the timer. Queued feedback is refreshed before
+encryption without bypassing a newer gap's grace period; an outstanding DTLS write
 is always retried unchanged. Each sender advertises its watermark every 200 ms
 while it has sent DATA within the last second, repeating unchanged watermarks
 to expose tail loss; idle connections stop advertising after that period.
