@@ -38,7 +38,7 @@ typedef struct {
 } ArqTx;
 typedef struct {
     uint32_t next, sent, high;
-    uint64_t last_data, last_mark, nack_due, last_feedback;
+    uint64_t last_data, last_rx_data, last_mark, nack_due, last_feedback;
     unsigned missing, cursor;
     unsigned pending, repair_cursor, srtt, last_rtt;
     uint64_t ping_token, ping_sent;
@@ -457,6 +457,21 @@ static void arq_retry_deferred(Tunnel *t) {
         a->repair_cursor=(index+1)%ARQ_WINDOW;
     }
 }
+/* Only payload traffic keeps fast sampling active; PING/PONG and MARK must
+ * not keep an otherwise idle tunnel in the fast sampling mode. */
+static void ping_tick(Tunnel *t) {
+    if (!t->active) return;
+    unsigned interval=t->cfg->probe ? 1000u : 20000u;
+    if (t->arq && !t->cfg->probe) {
+        uint64_t activity=t->arq->last_data>t->arq->last_rx_data ?
+                          t->arq->last_data : t->arq->last_rx_data;
+        if (activity && t->now-activity<5000u) interval=1000u;
+    }
+    if (t->last_ping && t->now-t->last_ping<interval) return;
+    unsigned char stamp[8];
+    put32(stamp,(uint32_t)(t->now>>32)); put32(stamp+4,(uint32_t)t->now);
+    if (enqueue(t,PING,stamp,sizeof(stamp))) t->last_ping=t->now;
+}
 static void arq_tick(Tunnel *t) {
     Arq *a = t->arq;
     if (!a) return;
@@ -538,6 +553,7 @@ static int receive_messages(Tunnel *t) {
             if (!xt_packet_valid(t->cfg, ip, ip_len, 1)) { ++t->drops; ++t->drop_ip; continue; }
             t->last_rx = t->now;
             if (sequenced) {
+                t->arq->last_rx_data = t->now;
                 int accepted = arq_receive(t, be16(p+8), 0);
                 if (accepted < 0) {
                     arq_log(t,"resync","trigger=data seq=%u high=%u",be16(p+8),(uint16_t)t->arq->high);
@@ -739,10 +755,7 @@ int xt_run(const XtConfig *cfg) {
                  * write here could block RX again even after recovery. */
                 if ((xdtls_write_pending(t->dtls) && !flush(t, 1)) || !receive_messages(t)) { reset(t); retry_at = t->now+1000; }
                 else {
-                    if (t->active && t->now-t->last_ping >= (cfg->probe ? 1000u : 20000u)) {
-                        unsigned char stamp[8]; put32(stamp, (uint32_t)(t->now>>32)); put32(stamp+4, (uint32_t)t->now);
-                        if (enqueue(t, PING, stamp, 8)) t->last_ping = t->now;
-                    }
+                    ping_tick(t);
                     if (t->active && !cfg->probe) {
                         unsigned char packet[65536];
                         while (packets_read < XT_READ_BUDGET && t->count < XT_QUEUE-4) {

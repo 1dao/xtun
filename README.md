@@ -336,6 +336,10 @@ limit, whichever is exhausted first. Only successfully sent originals enter
 the cache. Each packet can be repaired up to three times. The cooldown between
 successful repairs uses 1.5 times the larger of the latest and smoothed PONG RTT,
 clamped to 20–500 ms; it defaults to 100 ms before an RTT sample is available.
+The first PING is queued immediately after session activation. With ARQ enabled,
+PING samples RTT every second while either direction has carried payload data
+within the last five seconds; idle tunnels retain the 20-second keepalive interval.
+Control traffic does not extend the active sampling period.
 Repairs overtake unsent DATA while preserving original and repair FIFO order;
 an outstanding DTLS write is always completed unchanged. Requests blocked by
 the local byte budget or queue are retained and retried when resources permit,

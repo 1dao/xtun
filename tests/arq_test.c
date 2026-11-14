@@ -337,8 +337,41 @@ static void logging_test(void) {
     assert(!strstr(text,"event=disabled") && !strstr(text,"packet"));
     finish(&p); puts("PASS optional ARQ logs trace real recovery/timer events, bound previews and omit payloads");
 }
+static void ping_sampling_test(void) {
+    Pair p; init(&p); Tunnel *a=p.a;
+    p.ca.probe=p.cb.probe=0;
+    /* First sample is immediate even before 20 seconds of system uptime. */
+    a->now=p.b->now=100;
+    ping_tick(a); assert(a->count==1 && a->last_ping==100);
+    ping_tick(a); assert(a->count==1);
+    assert(flush(a,XT_QUEUE)); control(p.b); assert(flush(p.b,XT_QUEUE));
+    a->now=140; control(a);
+    assert(a->arq->srtt==40 && !a->arq->ping_wait);
+    /* Control traffic does not enable fast sampling. */
+    a->now=1100; ping_tick(a); assert(!a->count);
+    a->arq->last_data=a->now;
+    ping_tick(a); assert(a->count==1 && a->last_ping==1100);
+    assert(flush(a,XT_QUEUE));
+    a->now=2099; ping_tick(a); assert(!a->count);
+    a->now=2100; ping_tick(a); assert(a->count==1);
+    assert(flush(a,XT_QUEUE));
+    /* Receive-only traffic also enables fast sampling. */
+    a->arq->last_data=0; a->arq->last_rx_data=3100; a->now=3100;
+    ping_tick(a); assert(a->count==1); assert(flush(a,XT_QUEUE));
+    a->now=8100; ping_tick(a); assert(!a->count);
+    a->now=23099; ping_tick(a); assert(!a->count);
+    a->now=23100; ping_tick(a); assert(a->count==1);
+    assert(flush(a,XT_QUEUE));
+    /* Non-ARQ tunnels retain the idle keepalive period. */
+    Arq *saved=a->arq; a->arq=NULL; a->now=24100;
+    ping_tick(a); assert(!a->count); a->arq=saved;
+    p.ca.probe=1; ping_tick(a); assert(a->count==1);
+    assert(flush(a,XT_QUEUE));
+    a->active=0; a->now+=20000; ping_tick(a); assert(!a->count);
+    finish(&p); puts("PASS immediate RTT probe, 1s bidirectional activity sampling and 20s idle keepalive");
+}
 int main(void) {
     timer_test(); recovery_test(); priority_test(); reorder_test(); watermark_test(); wrap_test(); bounds_test(); queued_test(); batch_test();
-    burst_credit_test(); wait_stats_test(); logging_test();
+    burst_credit_test(); wait_stats_test(); logging_test(); ping_sampling_test();
     puts("ALL ARQ TESTS PASSED"); return 0;
 }
