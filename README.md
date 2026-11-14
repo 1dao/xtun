@@ -322,6 +322,10 @@ DTLS record. There are no positive ACKs and no global in-order delivery queue.
 The receiver gives each new gap a 5 ms reordering grace period before its first
 NACK. Each missing sequence then independently backs off through 20, 40, 80
 and at most 160 ms between requests, measured from successful feedback writes.
+Once RTT is sampled, each interval is additionally capped at half the smoothed
+RTT (rounded up and bounded to 20–160 ms). This reduces the wait for fresh feedback
+after the sender's repair cooldown ends; the sender still ignores early requests
+and never schedules an automatic repair from a stale NACK.
 Only due sequences are batched, with at least 5 ms between feedback packets.
 A single timer tracks the earliest per-gap deadline, so new gaps do not inherit
 an older gap's long backoff. The gap-free path does not scan the receive window.

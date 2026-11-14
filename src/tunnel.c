@@ -128,6 +128,16 @@ static unsigned arq_cooldown(const Arq *a) {
     unsigned delay=rtt+rtt/2;
     return delay<20 ? 20 : delay>500 ? 500 : delay;
 }
+/* Keep checking a persistent gap near the sender's cooldown boundary rather
+ * than leaving a full 160ms blind interval after an early NACK was ignored.
+ * With no RTT sample, preserve the original loss-of-feedback backoff. */
+static unsigned arq_feedback_delay(const Arq *a, unsigned backoff) {
+    if (!a->srtt) return backoff;
+    unsigned cap=(a->srtt+1)/2;
+    if (cap<ARQ_INITIAL) cap=ARQ_INITIAL;
+    if (cap>ARQ_BACKOFF_MAX) cap=ARQ_BACKOFF_MAX;
+    return backoff<cap ? backoff : cap;
+}
 static void arq_pong(Tunnel *t, uint64_t token) {
     Arq *a=t->arq;
     if (!a || !a->ping_wait || token!=a->ping_token || t->now<a->ping_sent) return;
@@ -328,7 +338,7 @@ static int flush(Tunnel *t, unsigned budget) {
             for (size_t j = XT_HEADER; j < n; j += 2) {
                 uint16_t seq = be16(p+j); ArqRx *r = &a->rx[seq%ARQ_WINDOW];
                 if (r->seq && (uint16_t)r->seq == seq && !r->received && !r->expired) {
-                    r->requested=1; r->feedback_due=t->now+r->delay;
+                    r->requested=1; r->feedback_due=t->now+arq_feedback_delay(a,r->delay);
                     if (r->delay<ARQ_BACKOFF_MAX) r->delay*=2;
                 }
                 a->cursor=(seq+1u)%ARQ_WINDOW;

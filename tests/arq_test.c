@@ -337,6 +337,49 @@ static void logging_test(void) {
     assert(!strstr(text,"event=disabled") && !strstr(text,"packet"));
     finish(&p); puts("PASS optional ARQ logs trace real recovery/timer events, bound previews and omit payloads");
 }
+/* Simulate 25ms each way. Feedback and repairs cross the simulated link only
+ * at their arrival time; the existing transport tests cover their decoding. */
+static unsigned timed_recovery(int sampled, int lose_repair) {
+    Pair p; init(&p);
+    p.a->arq->srtt=p.a->arq->last_rtt=50;
+    p.b->arq->srtt=sampled ? 50 : 0;
+    p.ab.drop=1; send_data(p.a); send_data(p.a); assert(take_data(p.b,2)==1);
+    unsigned arrivals[64], written=0, read=0, filled=0;
+    unsigned repair_arrival=0;
+    for (unsigned ms=0; ms<400 && !filled; ++ms) {
+        p.a->now=p.b->now=10000+ms;
+        arq_tick(p.b);
+        if (p.b->count) {
+            assert(written<64); p.ba.drop=1;
+            assert(flush(p.b,XT_QUEUE)); arrivals[written++]=ms+25;
+        }
+        while (read<written && arrivals[read]==ms) {
+            ++read; arq_request(p.a,1);
+        }
+        if (p.a->count) {
+            p.ab.drop=1; assert(flush(p.a,XT_QUEUE));
+            if (!lose_repair || p.a->arq_retransmits>1) repair_arrival=ms+25;
+        }
+        if (repair_arrival && repair_arrival==ms) {
+            assert(arq_receive(p.b,1,1)==1); filled=ms;
+        }
+    }
+    assert(filled && !p.b->arq->missing);
+    assert(p.a->arq_retransmits==(lose_repair ? 2u : 1u));
+    finish(&p); return filled;
+}
+static void feedback_rtt_test(void) {
+    Arq a={0};
+    assert(arq_feedback_delay(&a,160)==160);
+    a.srtt=1; assert(arq_feedback_delay(&a,160)==20);
+    a.srtt=51; assert(arq_feedback_delay(&a,160)==26);
+    assert(arq_feedback_delay(&a,20)==20);
+    a.srtt=1000; assert(arq_feedback_delay(&a,160)==160);
+    assert(timed_recovery(0,1)==195);
+    assert(timed_recovery(1,1)==150);
+    assert(timed_recovery(0,0)==55 && timed_recovery(1,0)==55);
+    puts("PASS RTT-bounded feedback: lost repair recovers in 150ms vs 195ms; healthy repair unchanged");
+}
 static void ping_sampling_test(void) {
     Pair p; init(&p); Tunnel *a=p.a;
     p.ca.probe=p.cb.probe=0;
@@ -372,6 +415,6 @@ static void ping_sampling_test(void) {
 }
 int main(void) {
     timer_test(); recovery_test(); priority_test(); reorder_test(); watermark_test(); wrap_test(); bounds_test(); queued_test(); batch_test();
-    burst_credit_test(); wait_stats_test(); logging_test(); ping_sampling_test();
+    burst_credit_test(); wait_stats_test(); logging_test(); ping_sampling_test(); feedback_rtt_test();
     puts("ALL ARQ TESTS PASSED"); return 0;
 }
