@@ -77,8 +77,13 @@ connection deletes its tagged fields. A top-level shared `psk` remains in the CF
 
 Select a profile to view its routing mode and tunnel addresses. Only one
 profile runs at a time. When switching profiles, the current client exits
-before the next starts. Disconnecting or closing the window asks the client
-to exit normally so it can remove its network resources. Expand the log
+before the next starts. While a client is active, closing the window hides it
+to the system tray and keeps the tunnel running. Click the tray icon to restore
+the window, or right-click it for **Show window** and **Exit**. Exit asks the
+client to stop normally and waits for network cleanup before closing the GUI.
+Closing an idle window exits normally. If the tray icon cannot be created,
+closing the window stops the client and exits instead. A background client
+error restores the window and opens the log. Expand the log
 panel to see or copy recent client messages.
 
 Enable **Start at sign-in** in the sidebar to open the GUI automatically when

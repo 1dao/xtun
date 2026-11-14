@@ -2,6 +2,7 @@
 #define RAYGUI_IMPLEMENTATION
 #include "raygui.h"
 #include "process.h"
+#include "tray.h"
 #include "client_config.h"
 #include <stdio.h>
 #include <string.h>
@@ -32,6 +33,7 @@ enum ConnectionState { DISCONNECTED, CONNECTING, CONNECTED, RECONNECTING, STOPPI
     X(ONE, "一次连接一个配置", "One active connection") \
     X(AUTORUN, "开机启动", "Start at sign-in") \
     X(AUTORUN_ERROR, "无法保存开机启动设置。", "Could not save the startup setting.") \
+    X(TRAY_ERROR, "托盘图标创建失败，关闭窗口将退出 XTun。", "Tray unavailable. Closing the window will exit XTun.") \
     X(AUTORUN_DIR_ERROR, "启动目录不可用，请手动重新打开 XTun。", "Startup directory unavailable. Open XTun manually.") \
     X(EMPTY, "还没有连接配置", "No connection profiles") \
     X(EMPTY_HINT, "点击左侧的 +，新建客户端配置。", "Use + on the left to create a profile.") \
@@ -395,13 +397,14 @@ int main(int argc, char **argv) {
         profile_count = loaded;
         if (profile_count) selected = 0;
     }
-    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_ALWAYS_RUN);
     InitWindow(920, 580, "XTun");
     if (!IsWindowReady()) return 1;
     SetWindowMinSize(730, 510);
     SetExitKey(KEY_NULL);
     SetTargetFPS(60);
     Font font = load_ui_font();
+    if (!ui_tray_init(GetWindowHandle(), text == chinese_text)) log_line(text[TXT_TRAY_ERROR]);
     set_font(font);
     GuiSetStyle(DEFAULT, TEXT_SIZE, 16);
     GuiSetStyle(DEFAULT, TEXT_SPACING, 0);
@@ -417,7 +420,9 @@ int main(int argc, char **argv) {
     GuiSetStyle(LISTVIEW, LIST_ITEMS_HEIGHT, 24);
     GuiSetStyle(LISTVIEW, LIST_ITEMS_SPACING, 2);
     for (int frames = 0; !closing || active >= 0; ++frames) {
-        if (WindowShouldClose() || (smoke && frames == 3)) {
+        int tray_events = ui_tray_poll();
+        if (tray_events & UI_TRAY_SHOW) ui_tray_show();
+        if (WindowShouldClose() || (tray_events & UI_TRAY_EXIT) || (smoke && frames == 3)) {
             closing = 1;
             pending = -1;
             if (active >= 0 && state != STOPPING) { ui_stop(); state = STOPPING; }
@@ -435,13 +440,17 @@ int main(int argc, char **argv) {
                 state = exit_code || cleanup_failed ? CLIENT_ERROR : DISCONNECTED;
                 failed = state == CLIENT_ERROR ? active : -1;
                 active = -1;
-                if (state == CLIENT_ERROR) log_open = true;
+                if (state == CLIENT_ERROR) {
+                    log_open = true;
+                    if (!closing) ui_tray_show();
+                }
                 int next = pending;
                 pending = -1;
                 if (!closing && next >= 0 && state == DISCONNECTED) start_profile(next);
                 cleanup_failed = false;
             }
         }
+        SetTargetFPS(ui_tray_visible() ? 60 : 10);
         int w = GetScreenWidth(), h = GetScreenHeight(), split = w < 820 ? 224 : 258;
         BeginDrawing();
         ClearBackground(RAYWHITE);
@@ -542,7 +551,9 @@ int main(int argc, char **argv) {
             }
             if (error >= 0) { error_text = error; dialog = ERROR_DIALOG; }
         }
+        ui_tray_close_to_tray(active >= 0 && !closing);
     }
+    ui_tray_remove();
     release_font(font);
     CloseWindow();
     return 0;
