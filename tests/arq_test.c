@@ -220,6 +220,52 @@ static void bounds_test(void) {
     assert(!p.b->arq->missing && !p.b->arq->timer && !p.b->count);
     finish(&p); puts("PASS byte budget, repair expiry, local delivery failure and timer expiry");
 }
+static void burst_credit_test(void) {
+    Pair p; init(&p);
+    unsigned char payload[XT_MTU]={0}, out[2048];
+    size_t initial=p.a->arq->credit;
+    for (unsigned i=0;i<600;++i) {
+        assert(enqueue(p.a,DATA,payload,sizeof(payload)) && flush(p.a,1));
+        assert(xdtls_read(p.b->dtls,out,sizeof(out))==XT_HEADER+2+sizeof(payload));
+        if (!i) assert(p.a->arq->credit==initial+(XT_HEADER+2+sizeof(payload))/4);
+    }
+    assert(p.a->arq->credit==ARQ_CREDIT_MAX);
+    /* A quiet period earns enough credit for a burst larger than the old cap. */
+    for (unsigned seq=1;seq<=100;++seq) {
+        arq_request(p.a,(uint16_t)seq);
+        assert(p.a->count==1 && flush(p.a,1));
+        assert(xdtls_read(p.b->dtls,out,sizeof(out))==XT_HEADER+2+sizeof(payload));
+    }
+    assert(p.a->arq_retransmits==100 && !p.a->arq_limited && !p.a->arq->pending);
+    assert(p.a->arq->credit==ARQ_CREDIT_MAX-100*(XT_HEADER+2+sizeof(payload)));
+    arq_request(p.a,101); assert(p.a->count==1);
+    p.a->arq->credit=ARQ_CREDIT_MAX; p.a->now+=ARQ_TTL;
+    assert(flush(p.a,1) && p.a->arq->credit==ARQ_CREDIT_MAX);
+    assert(!p.a->count && p.a->arq_retransmits==100);
+    finish(&p); puts("PASS larger earned burst allowance, unchanged quarter-rate earning and bounded expiry refund");
+}
+static void wait_stats_test(void) {
+    Pair p; init(&p);
+    const unsigned waits[]={0,10,11,50,51,100,101,250,251,500,501,900};
+    uint64_t total=0;
+    for (unsigned i=0;i<sizeof(waits)/sizeof(waits[0]);++i) {
+        p.ab.drop=1; send_data(p.a);
+        p.a->arq->credit=0; arq_request(p.a,(uint16_t)(i+1));
+        assert(p.a->arq->pending==1 && !p.a->count);
+        p.a->now+=waits[i]; total+=waits[i];
+        p.a->arq->credit=ARQ_CREDIT_MAX; arq_retry_deferred(p.a);
+        assert(!p.a->arq->pending && p.a->count==1 && flush(p.a,1));
+        assert(take_data(p.b,(uint16_t)(i+1))==1);
+    }
+    assert(p.a->arq_deferred_queued==12 && p.a->arq_defer_wait_max==900);
+    assert(p.a->arq_defer_wait_sum==total);
+    for (unsigned i=0;i<6;++i) assert(p.a->arq_defer_wait_bins[i]==2);
+    p.ab.drop=1; send_data(p.a); p.a->arq->credit=0; arq_request(p.a,13);
+    p.a->now+=ARQ_TTL; arq_retry_deferred(p.a);
+    assert(!p.a->arq->pending && p.a->arq_deferred_expired==1);
+    assert(p.a->arq_deferred_queued==12 && p.a->arq_defer_wait_sum==total);
+    finish(&p); puts("PASS deferred wait histogram boundaries, sum and exclusion of abandoned requests");
+}
 static void queued_test(void) {
     Pair p; init(&p);
     assert(arq_receive(p.b,2,1)==1); p.b->now+=5; arq_tick(p.b);
@@ -293,6 +339,6 @@ static void logging_test(void) {
 }
 int main(void) {
     timer_test(); recovery_test(); priority_test(); reorder_test(); watermark_test(); wrap_test(); bounds_test(); queued_test(); batch_test();
-    logging_test();
+    burst_credit_test(); wait_stats_test(); logging_test();
     puts("ALL ARQ TESTS PASSED"); return 0;
 }

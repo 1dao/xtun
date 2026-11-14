@@ -20,6 +20,7 @@ enum { READY = 1, DATA, PING, PONG, CLOSE, ARQ_DATA, ARQ_NACK, ARQ_MARK };
 #define ARQ_BACKOFF_MAX 160u
 #define ARQ_RESEND_GAP 100u /* fallback until an authenticated PONG gives RTT */
 #define ARQ_REPAIR_LIMIT 3u
+#define ARQ_CREDIT_MAX (128u*XT_MTU_MAX)
 #define ARQ_MARK_INTERVAL 200u
 #define ARQ_BATCH 512u /* 1024-byte feedback payload fits even the minimum MTU */
 typedef struct {
@@ -94,6 +95,7 @@ typedef struct {
     uint64_t arq_expired, arq_cache_miss, arq_limited;
     uint64_t arq_expired_ttl, arq_expired_window, arq_cache_absent, arq_cache_ttl;
     uint64_t arq_deferred, arq_deferred_queued, arq_deferred_expired, arq_defer_wait_max;
+    uint64_t arq_defer_wait_sum, arq_defer_wait_bins[6];
     uint64_t arq_cooldown_skip, arq_queue_skip, arq_retry_skip;
     struct { size_t len; uint64_t expires; int retry; unsigned char bytes[XT_HEADER + 2 + XT_MTU_MAX]; } queue[XT_QUEUE];
     int active, routes, failed, probe_ok, pong;
@@ -292,7 +294,7 @@ static int flush(Tunnel *t, unsigned budget) {
             arq_log(t,"repair_drop","seq=%u reason=expired late_ms=%llu",seq,
                     (unsigned long long)(t->now-t->queue[head].expires));
             t->arq->credit += n;
-            if (t->arq->credit > 32*XT_MTU_MAX) t->arq->credit = 32*XT_MTU_MAX;
+            if (t->arq->credit > ARQ_CREDIT_MAX) t->arq->credit = ARQ_CREDIT_MAX;
             arq_pop(t); continue;
         }
         int rc = xdtls_write(t->dtls, t->queue[head].bytes, n);
@@ -317,7 +319,7 @@ static int flush(Tunnel *t, unsigned budget) {
                 memcpy(cached->bytes, t->queue[head].bytes+XT_HEADER, cached->len);
                 a->last_data = t->now;
                 a->credit += n/4; /* at most 25% extra bytes plus a small burst */
-                if (a->credit > 32*XT_MTU_MAX) a->credit = 32*XT_MTU_MAX;
+                if (a->credit > ARQ_CREDIT_MAX) a->credit = ARQ_CREDIT_MAX;
             }
         }
         if (p[1] == ARQ_NACK) {
@@ -421,6 +423,9 @@ static void arq_try_repair(Tunnel *t, ArqTx *c, int from_nack) {
     if (c->wanted) {
         ++t->arq_deferred_queued;
         if (wait>t->arq_defer_wait_max) t->arq_defer_wait_max=wait;
+        t->arq_defer_wait_sum+=wait;
+        unsigned bin=wait<=10 ? 0 : wait<=50 ? 1 : wait<=100 ? 2 : wait<=250 ? 3 : wait<=500 ? 4 : 5;
+        ++t->arq_defer_wait_bins[bin];
         arq_defer_clear(t,c,NULL);
     }
     c->queued = 1; t->arq->credit -= cost;
@@ -603,7 +608,7 @@ static void print_arq_stats(Tunnel *t) {
     printf(" expired_ttl=%llu expired_window=%llu cache_absent=%llu cache_expired=%llu "
            "deferred=%llu deferred_queued=%llu deferred_expired=%llu defer_wait_max_ms=%llu "
            "cooldown_skip=%llu queue_skip=%llu retry_limit_skip=%llu "
-           "pending=%u rtt_ms=%u cooldown_ms=%u\n",
+           "pending=%u rtt_ms=%u cooldown_ms=%u",
            (unsigned long long)t->arq_expired_ttl,(unsigned long long)t->arq_expired_window,
            (unsigned long long)t->arq_cache_absent,(unsigned long long)t->arq_cache_ttl,
            (unsigned long long)t->arq_deferred,(unsigned long long)t->arq_deferred_queued,
@@ -611,6 +616,13 @@ static void print_arq_stats(Tunnel *t) {
            (unsigned long long)t->arq_cooldown_skip,(unsigned long long)t->arq_queue_skip,
            (unsigned long long)t->arq_retry_skip,t->arq ? t->arq->pending : 0,
            t->arq ? t->arq->srtt : 0,t->arq ? arq_cooldown(t->arq) : 0);
+    printf(" defer_wait_sum_ms=%llu defer_wait_0_10_ms=%llu defer_wait_11_50_ms=%llu "
+           "defer_wait_51_100_ms=%llu defer_wait_101_250_ms=%llu "
+           "defer_wait_251_500_ms=%llu defer_wait_gt500_ms=%llu\n",
+           (unsigned long long)t->arq_defer_wait_sum,
+           (unsigned long long)t->arq_defer_wait_bins[0],(unsigned long long)t->arq_defer_wait_bins[1],
+           (unsigned long long)t->arq_defer_wait_bins[2],(unsigned long long)t->arq_defer_wait_bins[3],
+           (unsigned long long)t->arq_defer_wait_bins[4],(unsigned long long)t->arq_defer_wait_bins[5]);
 }
 static void print_live_stats(Tunnel *t, uint64_t start) {
     xUdpStats udp = {0};

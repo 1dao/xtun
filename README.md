@@ -340,8 +340,16 @@ Repairs overtake unsent DATA while preserving original and repair FIFO order;
 an outstanding DTLS write is always completed unchanged. Requests blocked by
 the local byte budget or queue are retained and retried when resources permit,
 within the same cache/window and expiry limits. Repair messages have a plaintext byte budget of 25% of
-original message bytes plus a bounded initial burst; control and DTLS/UDP/IP
+original message bytes plus an initial allowance of four maximum MTUs. Earned
+credit can accumulate up to 128 maximum MTUs to absorb short loss bursts;
+this does not change the 25% earning rate. Control and DTLS/UDP/IP
 overhead are additional. Memory per enabled peer is bounded at roughly 1.5 MiB.
+`ARQ_STATS` reports deferred repair wait counts in disjoint millisecond ranges
+0–10, 11–50, 51–100, 101–250, 251–500 and over 500, plus `defer_wait_sum_ms`.
+These cumulative counts cover deferred requests that successfully entered the
+send queue and sum to `deferred_queued`; divide the wait sum by that count for
+the mean. They exclude requests abandoned while waiting, which are counted by
+`deferred_expired`, and exclude time spent in the send queue or network.
 Out-of-window/ambiguous jumps cause a session reset; 16-bit serial comparison
 still requires an active sequence span below half the sequence space and cannot
 provide arbitrary-blackout reliability. Sequence/feedback state is cleared on
