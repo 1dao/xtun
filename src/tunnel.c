@@ -659,7 +659,11 @@ static void print_live_stats(Tunnel *t, uint64_t start) {
            "udp_send_block=%llu udp_send_err=%llu udp_recv_err=%llu "
            "tun_tx_bytes=%llu tun_rx_bytes=%llu dtls_drop=%llu txq_drop=%llu "
            "peer_drop=%llu frame_drop=%llu ip_drop=%llu tun_write_drop=%llu "
-           "win_oversize=%llu win_ring_full=%llu win_write_err=%llu\n",
+           "win_oversize=%llu win_ring_full=%llu win_write_err=%llu "
+           "dtls_write_pending=%d dtls_rx_used=%u dtls_rx_space=%u "
+           "udp_read_paused=%d udp_write_waiting=%d udp_read_events=%llu udp_write_events=%llu "
+           "udp_read_pauses=%llu udp_read_resumes=%llu udp_read_event_age_ms=%lld "
+           "udp_write_event_age_ms=%lld udp_recv_calls=%llu udp_recv_budget_yields=%llu\n",
            (long long)time(NULL), (unsigned long long)(t->now - start), t->active,
            (unsigned long long)udp.datagrams_sent, (unsigned long long)udp.datagrams_received,
            (unsigned long long)udp.bytes_sent, (unsigned long long)udp.bytes_received,
@@ -670,7 +674,13 @@ static void print_live_stats(Tunnel *t, uint64_t start) {
            (unsigned long long)t->drop_peer, (unsigned long long)t->drop_frame,
            (unsigned long long)t->drop_ip, (unsigned long long)t->drop_tun_write,
            (unsigned long long)dev.oversize,
-           (unsigned long long)dev.write_ring_full, (unsigned long long)dev.write_error);
+           (unsigned long long)dev.write_ring_full, (unsigned long long)dev.write_error,
+           xdtls_write_pending(t->dtls), t->dtls ? XDTLS_RX_SLOTS-xdtls_input_space(t->dtls) : 0,
+           xdtls_input_space(t->dtls), udp.read_paused, udp.write_waiting,
+           (unsigned long long)udp.read_events, (unsigned long long)udp.write_events,
+           (unsigned long long)udp.read_pauses, (unsigned long long)udp.read_resumes,
+           (long long)udp.read_event_age_ms, (long long)udp.write_event_age_ms,
+           (unsigned long long)udp.receive_calls, (unsigned long long)udp.budget_yields);
     print_arq_stats(t); fflush(stdout);
 }
 #ifndef _WIN32

@@ -174,6 +174,11 @@ are installed. Ctrl+C performs cleanup.
   it for throughput comparisons. A `gap_filled` event may still be a late original;
   correlate sequence numbers with the sender's `repair_sent` events when debugging.
 - `stats_interval`: seconds between `LIVE_STATS` lines (0 disables, default).
+  Diagnostics include `dtls_write_pending`, DTLS receive slots used/free,
+  `udp_read_paused`, `udp_write_waiting`, read/write callback counts and ages,
+  read pause/resume counts, receive syscall counts and budget yields. Callback
+  ages are monotonic milliseconds since the last callback (`-1` means never).
+  These describe application event state, not packets pending in the kernel.
   Set to 1 on both ends for diagnostics; for a tagged client use
   `work.stats_interval=1` with the actual tag. Counters are cumulative.
   `unix` is the wall-clock timestamp and `elapsed_ms` is monotonic elapsed

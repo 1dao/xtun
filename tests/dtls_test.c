@@ -244,16 +244,26 @@ static void duplex_backpressure_test(void) {
     assert(input.received == before + 1 && !input.rejected);
     assert(xdtls_read(a.dtls, out, sizeof(out)) == 5 && !memcmp(out, "reset", 5));
     xudp_destroy(sender);
+    xUdpStats diag; xudp_get_stats(receiver,&diag);
+    assert(diag.read_events && diag.read_event_age_ms>=0);
+    uint64_t pauses=diag.read_pauses, resumes=diag.read_resumes, writes=diag.write_events;
     xudp_pause_read(receiver); xudp_pause_read(receiver);
+    xudp_get_stats(receiver,&diag);
+    assert(diag.read_paused && diag.read_pauses==pauses+1);
     assert(xpoll_fd_count() == 1); /* retain error watch even with no readable fd */
     assert(!xudp_wait_writable(receiver, true));
     assert(!xudp_wait_writable(receiver, true)); /* idempotent arm */
+    xudp_get_stats(receiver,&diag); assert(diag.write_waiting);
     assert(xpoll_poll(100) > 0);
+    xudp_get_stats(receiver,&diag);
+    assert(!diag.write_waiting && diag.write_events==writes+1 && diag.write_event_age_ms>=0);
     assert(xpoll_poll(0) == 0);
     assert(!xudp_wait_writable(receiver, true));
     assert(!xudp_wait_writable(receiver, false)); /* cancel before readiness */
     assert(xpoll_poll(0) == 0);
     assert(!xudp_resume_read(receiver)); /* restoring RX must preserve write watch */
+    xudp_get_stats(receiver,&diag);
+    assert(!diag.read_paused && diag.read_resumes==resumes+1);
     assert(!xudp_wait_writable(receiver, true));
     xudp_pause_read(receiver);
     assert(!xudp_resume_read(receiver));
@@ -262,6 +272,8 @@ static void duplex_backpressure_test(void) {
     assert(!xudp_wait_writable(receiver, true)); /* close while armed */
     xudp_destroy(receiver);
     assert(!xudp_live_count() && !xudp_socket_count());
+    xudp_get_stats(NULL,&diag);
+    assert(!diag.read_events && diag.read_event_age_ms==-1 && diag.write_event_age_ms==-1);
     xpoll_uninit(); socket_cleanup(); destroy(&a, &b);
     puts("PASS full-duplex backpressure, one-shot writable wakeups, cancellation and read pause/resume without loss/duplicates");
 }
