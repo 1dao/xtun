@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <shellapi.h>
 #include <stdio.h>
 #include <string.h>
 #include "process.h"
@@ -6,6 +7,46 @@
 #include "xtun.h"
 
 static HANDLE child, control, output;
+
+/* Preserve the configuration directory: XTun resolves client.cfg from cwd. */
+#define RUN_KEY L"Software\\Microsoft\\Windows\\CurrentVersion\\Run"
+#define RUN_VALUE L"xtun-gui"
+int ui_get_autorun(void) {
+    HKEY key;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS)
+        return 0;
+    DWORD type = 0, size = 0;
+    LONG result = RegQueryValueExW(key, RUN_VALUE, NULL, &type, NULL, &size);
+    RegCloseKey(key);
+    return result == ERROR_SUCCESS && type == REG_SZ && size > sizeof(wchar_t);
+}
+int ui_set_autorun(int enable) {
+    HKEY key;
+    wchar_t exe[MAX_PATH], directory[MAX_PATH], command[MAX_PATH * 2 + 64];
+    if (enable) {
+        DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH);
+        DWORD d = GetCurrentDirectoryW(MAX_PATH, directory);
+        if (!n || n >= MAX_PATH || !d || d >= MAX_PATH) return 0;
+        /* Appending \\. keeps a drive root's backslash away from the quote. */
+        if (swprintf(command, sizeof(command)/sizeof(*command),
+                     L"\"%ls\" --autostart \"%ls\\.\"", exe, directory) < 0) return 0;
+    }
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, NULL, 0, KEY_SET_VALUE,
+                        NULL, &key, NULL) != ERROR_SUCCESS) return 0;
+    LONG result = enable ? RegSetValueExW(key, RUN_VALUE, 0, REG_SZ,
+                           (const BYTE *)command, (DWORD)((wcslen(command) + 1) * sizeof(wchar_t)))
+                         : RegDeleteValueW(key, RUN_VALUE);
+    RegCloseKey(key);
+    return result == ERROR_SUCCESS || (!enable && result == ERROR_FILE_NOT_FOUND);
+}
+int ui_autorun_workdir(void) {
+    int count = 0;
+    wchar_t **args = CommandLineToArgvW(GetCommandLineW(), &count);
+    int ok = args && count == 3 && !wcscmp(args[1], L"--autostart") &&
+             SetCurrentDirectoryW(args[2]);
+    if (args) LocalFree(args);
+    return ok;
+}
 
 static void close_handle(HANDLE *handle) {
     if (*handle) CloseHandle(*handle);

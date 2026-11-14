@@ -30,6 +30,9 @@ enum ConnectionState { DISCONNECTED, CONNECTING, CONNECTED, RECONNECTING, STOPPI
     X(SPLIT, "IPv4 分流", "IPv4 split tunnel") \
     X(FULL, "IPv4 全局", "IPv4 full tunnel") \
     X(ONE, "一次连接一个配置", "One active connection") \
+    X(AUTORUN, "开机启动", "Start at sign-in") \
+    X(AUTORUN_ERROR, "无法保存开机启动设置。", "Could not save the startup setting.") \
+    X(AUTORUN_DIR_ERROR, "启动目录不可用，请手动重新打开 XTun。", "Startup directory unavailable. Open XTun manually.") \
     X(EMPTY, "还没有连接配置", "No connection profiles") \
     X(EMPTY_HINT, "点击左侧的 +，新建客户端配置。", "Use + on the left to create a profile.") \
     X(UNAVAILABLE, "配置文件不可用", "Configuration file unavailable") \
@@ -216,6 +219,7 @@ static const char *mode(const ProfileInfo *info) {
 enum Action { NONE, EDIT, REMOVE, NEW_PROFILE, CONFIRM_REMOVE, CONNECT_PROFILE };
 enum Dialog { NO_DIALOG, REMOVE_DIALOG, ERROR_DIALOG };
 static int menu_profile = -1;
+static bool autorun, autorun_error;
 
 static enum Action sidebar(int width, int height, int modal) {
     DrawRectangle(0, 0, width, height, (Color){244, 247, 248, 255});
@@ -241,7 +245,7 @@ static enum Action sidebar(int width, int height, int modal) {
     DrawLineEx((Vector2){plus.x + 8, plus.y + 15}, (Vector2){plus.x + 22, plus.y + 15}, 2, teal);
     DrawLineEx((Vector2){plus.x + 15, plus.y + 8}, (Vector2){plus.x + 15, plus.y + 22}, 2, teal);
 
-    int visible = (height - 121) / 63;
+    int visible = (height - 154) / 63;
     int last = profile_count > visible ? profile_count - visible : 0;
     Rectangle region = {12, 75, width - 24, visible * 63};
     Vector2 mouse = GetMousePosition();
@@ -280,6 +284,14 @@ static enum Action sidebar(int width, int height, int modal) {
         if (thumb < 16) thumb = 16;
         DrawRectangle(width - 8, 75 + (track - thumb) * profile_scroll / last, 3, thumb, rule);
     }
+    if (menu_profile >= 0) GuiDisable();
+    bool requested = autorun;
+    GuiCheckBox((Rectangle){20, height - 60, 16, 16}, text[TXT_AUTORUN], &requested);
+    if (requested != autorun) {
+        if (ui_set_autorun(requested)) autorun = requested;
+        else autorun_error = true;
+    }
+    if (menu_profile >= 0) GuiEnable();
     caption(text[TXT_ONE], 20, height - 27, 15, muted);
     if (open >= 0) {
         int y = 75 + (open - profile_scroll) * 63 + 44;
@@ -369,11 +381,15 @@ static void start_profile(int index) {
 }
 int main(int argc, char **argv) {
     int smoke = argc == 2 && !strcmp(argv[1], "--smoke");
+    int boot = argc > 1 && !strcmp(argv[1], "--autostart");
+    int directory_ok = !boot || ui_autorun_workdir();
+    autorun = smoke ? false : ui_get_autorun();
     int admin = ui_admin(), closing = 0;
     bool log_open = false;
     enum Dialog dialog = NO_DIALOG;
     int error_text = TXT_STORE_ERROR;
-    int loaded = smoke ? 0 : client_configs_load(profiles, details);
+    int loaded = smoke || !directory_ok ? 0 : client_configs_load(profiles, details);
+    if (!directory_ok) { dialog = ERROR_DIALOG; error_text = TXT_AUTORUN_DIR_ERROR; }
     if (loaded < 0) dialog = ERROR_DIALOG;
     else {
         profile_count = loaded;
@@ -460,6 +476,11 @@ int main(int argc, char **argv) {
         }
         EndDrawing();
         if (closing) continue;
+        if (autorun_error) {
+            autorun_error = false;
+            error_text = TXT_AUTORUN_ERROR;
+            dialog = ERROR_DIALOG;
+        }
         if (action == NEW_PROFILE && (loaded < 0 || profile_count == PROFILE_LIMIT || active >= 0)) {
             error_text = loaded < 0 ? TXT_STORE_ERROR :
                          profile_count == PROFILE_LIMIT ? TXT_LIMIT : TXT_EDIT_WHILE_ACTIVE;

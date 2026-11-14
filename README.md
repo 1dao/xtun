@@ -81,6 +81,14 @@ before the next starts. Disconnecting or closing the window asks the client
 to exit normally so it can remove its network resources. Expand the log
 panel to see or copy recent client messages.
 
+Enable **Start at sign-in** in the sidebar to open the GUI automatically when
+the current Windows user signs in. This uses the current user's Run registry
+entry (`xtun-gui`) and remembers the configuration working directory used when
+enabled. Disable the checkbox to remove the entry. Startup opens the interface;
+it does not connect automatically or elevate privileges. Connecting still
+requires running XTun as administrator. Re-enable the option after moving the
+executable or configuration directory.
+
 ## Configure and run
 
 XTun always reads configuration from the current working directory. The
