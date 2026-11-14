@@ -187,13 +187,18 @@ are installed. Ctrl+C performs cleanup.
   Start with `mtu=1280` when comparing performance.
   ARQ receivers buffer out-of-order IP packets and deliver them to the virtual
   adapter in sequence after gaps are repaired. Buffered packets are not requested
-  again. The receive ring holds at most 1024 packets (about 1.4 MiB of additional
+  again. The receive ring holds at most 8192 packets (about 10.94 MiB of additional
   payload storage per session). An unrepaired gap is skipped after the existing
-  1000 ms recovery deadline, or when it must leave the bounded window; later
+  5000 ms recovery deadline, or when it must leave the bounded window; later
   arrivals for skipped sequences are discarded. Adapter write backpressure is
   retried within the same deadline. This ordering is tunnel-wide, so a gap can
   temporarily delay other flows. ARQ_STATS reports order_buffered, order_waits,
   and order_skips for pending packets, out-of-order arrivals, and skipped gaps.
+  A repair request whose cache slot contains a newer packet also emits
+  `ARQ_CACHE_MISS reason=overwritten` (with a side field), even when arq_log=0.
+  It includes requested/current slot sequences, newest sequence, window size,
+  and the cumulative overwrite count. Reports are limited to one per second;
+  an empty slot or an expired matching packet is not classified as overwritten.
 - `arq_log`: `0` (default) or `1`. Enable on both ends for short diagnostics;
   tagged clients use e.g. `work.arq_log=1`. This is independent of `stats_interval`.
   `ARQ_EVENT` lines include wall-clock seconds, monotonic milliseconds, direction
@@ -373,7 +378,7 @@ is always retried unchanged. Each sender advertises its watermark every 200 ms
 while it has sent DATA within the last second, repeating unchanged watermarks
 to expose tail loss; idle connections stop advertising after that period.
 
-Recovery uses a fixed 1024-packet cache/window and a one-second eligibility
+Recovery uses a fixed 8192-packet cache/window and a five-second eligibility
 limit, whichever is exhausted first. Only successfully sent originals enter
 the cache. Each packet can be repaired up to three times. The cooldown between
 successful repairs uses 1.5 times the larger of the latest and smoothed PONG RTT,

@@ -31,6 +31,8 @@ static void ordered_delivery_test(void) {
     assert(arq_store_packet(t, 2, "B", 1) == 1);
     assert(!delivered_count && t->arq->buffered == 1 && t->arq->missing == 1);
     assert(arq_store_packet(t, 2, "B", 1) == 0);
+    t->now += 4000; arq_drain(t,0);
+    assert(!delivered_count && t->arq->buffered == 1 && t->arq->missing == 1);
     assert(arq_store_packet(t, 1, "A", 1) == 1);
     assert(delivered_count == 2 && !memcmp(delivered_bytes,"AB",2));
     assert(!t->arq->buffered && !t->arq->missing);
@@ -261,7 +263,7 @@ static void watermark_test(void) {
     feedback(p.b); control(p.a); assert(p.a->count==1 && flush(p.a,1));
     assert(take_data(p.b,1)==1); /* no later DATA was needed */
     p.a->now+=200; feedback(p.a); control(p.b); assert(!p.b->arq->missing);
-    p.a->now=11200; arq_tick(p.a); assert(!p.a->count); /* stop after cache lifetime */
+    p.a->now=p.a->arq->last_data+ARQ_TTL; arq_tick(p.a); assert(!p.a->count); /* stop after cache lifetime */
     finish(&p); puts("PASS 200ms sender-only watermark, tail recovery and idle suppression");
 }
 static void wrap_test(void) {
@@ -281,7 +283,7 @@ static void wrap_test(void) {
     assert(arq_receive(p.b,(uint16_t)70000,1)==0);
     assert(arq_receive(p.b,(uint16_t)(70000+32768),1)==-1);
     assert(arq_receive(p.b,(uint16_t)(70000+ARQ_WINDOW),1)==-1);
-    arq_request(p.a,1); assert(!p.a->count && p.a->arq_cache_miss);
+    arq_request(p.a,(uint16_t)(70000-ARQ_WINDOW)); assert(!p.a->count && p.a->arq_cache_miss);
     finish(&p); puts("PASS 70,000 DATA messages, 16-bit rollover including lost zero, bounded cache and ambiguous jump rejection");
 }
 static void bounds_test(void) {
@@ -382,6 +384,13 @@ static void logging_test(void) {
     fflush(stdout); int saved=dup(fileno(stdout)); assert(saved>=0);
     assert(dup2(fileno(trace),fileno(stdout))>=0);
     arq_log(p.a,"disabled","value=1");
+    /* An occupied newer slot proves overwrite, not just an unknown request.
+     * Reports remain enabled without verbose tracing and are rate limited. */
+    p.a->arq->sent=ARQ_WINDOW+1;
+    p.a->arq->tx[1]=(ArqTx){.seq=ARQ_WINDOW+1,.born=p.a->now};
+    arq_request(p.a,1); arq_request(p.a,1);
+    assert(p.a->arq_cache_overwritten==2);
+    memset(p.a->arq->tx,0,sizeof(p.a->arq->tx)); p.a->arq->sent=0;
     p.ca.arq_log=p.cb.arq_log=1; p.cb.server=1;
     send_data(p.a); assert(take_data(p.b,1)==1);
     p.ab.drop=1; send_data(p.a); send_data(p.a); assert(take_data(p.b,3)==1);
@@ -412,6 +421,8 @@ static void logging_test(void) {
     assert(strstr(text,"reason=gap_filled") && strstr(text,"reason=expired"));
     assert(strstr(text,"side=server") && strstr(text,"mono_ms=") && strstr(text,"omitted=4"));
     assert(!strstr(text,"event=disabled") && !strstr(text,"packet"));
+    const char *report=strstr(text,"ARQ_CACHE_MISS side=client reason=overwritten requested_seq=1 requested_logical=1");
+    assert(report && !strstr(report+1,"ARQ_CACHE_MISS"));
     finish(&p); puts("PASS optional ARQ logs trace real recovery/timer events, bound previews and omit payloads");
 }
 /* Simulate 25ms each way. Feedback and repairs cross the simulated link only

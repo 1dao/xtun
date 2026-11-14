@@ -12,8 +12,10 @@
 /* Linux clamps SO_RCVBUF/SO_SNDBUF to 2x rmem_max and ignores the rest. */
 #define XT_UDP_BUFFER (4*1024*1024)
 enum { READY = 1, DATA, PING, PONG, CLOSE, ARQ_DATA, ARQ_NACK, ARQ_MARK };
-#define ARQ_WINDOW 1024u
-#define ARQ_TTL 1000u
+#define ARQ_WINDOW 8192u
+_Static_assert(ARQ_WINDOW < 32768u && (65536u % ARQ_WINDOW) == 0,
+               "ARQ ring must divide the wire sequence space and stay below half range");
+#define ARQ_TTL 5000u
 #define ARQ_REORDER 5u
 #define ARQ_FEEDBACK_GAP 5u
 #define ARQ_INITIAL 20u
@@ -97,6 +99,7 @@ typedef struct {
     Arq *arq;
     uint64_t arq_nacks, arq_requests, arq_retransmits, arq_recovered, arq_duplicates;
     uint64_t arq_order_waits, arq_order_skips;
+    uint64_t arq_cache_overwritten, arq_cache_report_at;
     uint64_t arq_expired, arq_cache_miss, arq_limited;
     uint64_t arq_expired_ttl, arq_expired_window, arq_cache_absent, arq_cache_ttl;
     uint64_t arq_deferred, arq_deferred_queued, arq_deferred_expired, arq_defer_wait_max;
@@ -495,6 +498,21 @@ static void arq_request(Tunnel *t, uint16_t seq) {
         int absent=!c->seq || (uint16_t)c->seq!=seq;
         ++t->arq_cache_miss;
         if (absent) ++t->arq_cache_absent; else ++t->arq_cache_ttl;
+        unsigned back=(uint16_t)((uint16_t)t->arq->sent-seq);
+        uint32_t requested=t->arq->sent>=back ? t->arq->sent-back : 0;
+        int overwritten=back<32768 && requested && c->seq>requested && (uint16_t)c->seq!=seq;
+        if (overwritten) {
+            ++t->arq_cache_overwritten;
+            /* Rare failure evidence remains visible without per-packet tracing.
+             * Bound synchronous output to one report per second per tunnel. */
+            if (t->arq_cache_overwritten==1 || t->now-t->arq_cache_report_at>=1000) {
+                printf("ARQ_CACHE_MISS side=%s reason=overwritten requested_seq=%u requested_logical=%u "
+                       "cached_seq=%u cached_logical=%u newest_logical=%u behind=%u window=%u overwritten_total=%llu\n",
+                       t->cfg->server ? "server" : "client",seq,requested,(uint16_t)c->seq,c->seq,
+                       t->arq->sent,back,ARQ_WINDOW,(unsigned long long)t->arq_cache_overwritten);
+                fflush(stdout); t->arq_cache_report_at=t->now;
+            }
+        }
         arq_log(t,"repair_skip","seq=%u reason=%s",seq,absent ? "cache_absent" : "cache_expired"); return;
     }
     if (c->queued || c->retries>=ARQ_REPAIR_LIMIT || t->now<c->retry_at) {
