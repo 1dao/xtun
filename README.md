@@ -400,3 +400,10 @@ increases and automatic fallback require a future path MTU implementation.
 Normal cleanup removes only resources created by the process. Forced process
 termination and host crashes are outside the initial recovery guarantee.
 This implementation and tests do not constitute a security audit.
+
+On Linux, `xtun server` runs as a daemon by default and appends stdout/stderr
+to `server.log` in the working directory. Use `xtun server --foreground` for
+debugging, systemd, or external log redirection. `--check` and `--probe` remain
+in the foreground, as do Windows servers. Stop the daemon with SIGTERM for
+normal route and hook cleanup. Configuration is validated before detaching;
+a later startup failure is reported in `server.log` (the launcher has already exited).

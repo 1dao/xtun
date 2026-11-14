@@ -67,7 +67,7 @@ def main():
                                bind="192.0.2.2", port=PORT, name="xtun0", local_networks=["198.19.0.0/24"])
         config(directory/"server.cfg", **server_settings,
                PostUp="touch hook-marker; false; touch hook-unexpected", PostDown="rm -f hook-marker; touch hook-cleaned")
-        failed, failed_log = spawn(server,[BIN,"server"],"failed-hook.log")
+        failed, failed_log = spawn(server,[BIN,"server","--foreground"],"failed-hook.log")
         assert failed.wait(timeout=8) != 0 and "PostUp failed" in contents(failed_log)
         assert (directory/"hook-cleaned").exists()
         assert not (directory/"hook-marker").exists() and not (directory/"hook-unexpected").exists()
@@ -78,7 +78,7 @@ def main():
                bind="192.0.2.1", endpoint="192.0.2.2", port=PORT, name="xtun0", routes=["198.19.0.0/24"], mtu=1330)
         ns(server,"sysctl","-q","-w","net.ipv4.ip_forward=1")
         (directory/"hook.nft").write_text("table ip xtun_test {\nchain postrouting {\ntype nat hook postrouting priority srcnat;\nip saddr 10.77.0.2 ip daddr 198.19.0.0/24 masquerade\n}\n}\n")
-        sp, sl = spawn(server,[BIN,"server"],"server.log")
+        sp, sl = spawn(server,[BIN,"server","--foreground"],"server.log")
         cp, cl = spawn(client,[BIN,"client"],"client.log")
         deadline = time.monotonic()+15
         while "READY " not in contents(sl) or "READY " not in contents(cl):

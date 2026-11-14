@@ -1,4 +1,5 @@
 #include "xsock.h"
+#include "xdaemon.h"
 #include "config.h"
 #include "xtun.h"
 #include <stdio.h>
@@ -15,13 +16,15 @@ int main(int argc, char **argv) {
         return ok ? 0 : 1;
     }
     if (argc < 2 || argc > 5 || (strcmp(argv[1], "client") && strcmp(argv[1], "server"))) {
-        fputs("XTun: DTLS encrypted IPv4 tunnel\nUsage:\n  xtun keygen [FILE]\n  xtun client [--tag TAG] [--check|--probe]\n  xtun server [--check|--probe]\n", stderr); return 1;
+        fputs("XTun: DTLS encrypted IPv4 tunnel\nUsage:\n  xtun keygen [FILE]\n  xtun client [--tag TAG] [--check|--probe]\n  xtun server [--foreground] [--check|--probe]\n", stderr); return 1;
     }
     XtConfig cfg = {0}; cfg.server = !strcmp(argv[1], "server");
     const char *tag = NULL;
+    int foreground = 0;
     for (int i = 2; i < argc; ++i) {
         if (!strcmp(argv[i], "--tag") && !cfg.server && !tag &&
             i + 1 < argc && xt_tag_valid(argv[i + 1])) tag = argv[++i];
+        else if (!strcmp(argv[i], "--foreground") && cfg.server && !foreground) foreground = 1;
         else if (!strcmp(argv[i], "--check") && !cfg.check && !cfg.probe && !cfg.managed) cfg.check = 1;
         else if (!strcmp(argv[i], "--probe") && !cfg.check && !cfg.probe && !cfg.managed) cfg.probe = 1;
 #ifdef _WIN32
@@ -33,10 +36,34 @@ int main(int argc, char **argv) {
     }
     const char *path = cfg.server ? XT_SERVER_CONFIG : XT_CLIENT_CONFIG;
     if (!xt_load_config(&cfg, path, tag)) return 1;
+    int daemon_initialized = 0;
+#ifndef _WIN32
+    if (cfg.server && !cfg.check && !cfg.probe && !foreground) {
+        /* Check log access before detaching so a bad path fails visibly. */
+        FILE *log = fopen("server.log", "a");
+        if (!log) { perror("server.log"); return 1; }
+        fclose(log);
+        fflush(NULL);
+        if (xdaemon_init(1)) {
+            perror("daemon initialization");
+            xdaemon_uninit();
+            return 1;
+        }
+        daemon_initialized = 1;
+        if (!freopen("server.log", "a", stdout) || !freopen("server.log", "a", stderr)) {
+            xdaemon_uninit();
+            return 1;
+        }
+        setvbuf(stdout, NULL, _IOLBF, 0);
+    }
+#else
+    (void)foreground;
+#endif
     int rc;
     if (cfg.check) { puts("Configuration valid (no network changes)"); rc = 0; }
     else rc = xt_run(&cfg);
     volatile unsigned char *secret = cfg.key;
     for (size_t i = 0; i < sizeof(cfg.key); ++i) secret[i] = 0;
+    if (daemon_initialized) xdaemon_uninit();
     return rc;
 }
