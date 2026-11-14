@@ -82,7 +82,9 @@ static int read_fields(XtConfig *c, const char *tag) {
         !field_number(tag, "run_seconds", &c->run_seconds, 0, 0, 86400) ||
         !field_number(tag, "session_seconds", &c->session_seconds, 3600, 30, 86400) ||
         !field_number(tag, "stats_interval", &c->stats_interval, 0, 0, 3600) ||
-        !field_number(tag, "mtu", &c->mtu_limit, 0, 0, XT_MTU_MAX)) return 0;
+        !field_number(tag, "mtu", &c->mtu_limit, 0, 0, XT_MTU_MAX) ||
+        !field_number(tag, "arq", &c->arq, 0, 0, 1) ||
+        !field_number(tag, "arq_log", &c->arq_log, 0, 0, 1)) return 0;
     if (c->mtu_limit && c->mtu_limit < XT_MTU) return 0;
     c->mtu = XT_MTU;
     if (!*c->identity || !*c->name || strlen(c->name) > 15 ||

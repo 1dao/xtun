@@ -16,6 +16,7 @@ not interoperate with WireGuard.
   transmit queues, IPv4 checksum/length and source/destination authorization.
 - Normal-exit cleanup, idle detection, full-handshake session renewal.
 - A no-adapter `--probe` mode for testing the actual secure UDP transport.
+- Optional bounded, unordered DATA recovery using batched NACKs (`arq=1`).
 
 The initial command-line version requires administrator/root access to create
 adapters and routes. Service installation, automatic crash recovery, IPv6,
@@ -150,11 +151,28 @@ are installed. Ctrl+C performs cleanup.
 - `run_seconds`: optional bounded runtime, default 0 (until interrupted).
 - `mtu`: inner MTU ceiling, `0` (automatic, default) or `1280..1400`.
   For a tagged client use `work.mtu=0` with the actual tag. After DTLS
-  handshaking, each end subtracts the 8-byte tunnel header from its actual
+  handshaking, each end subtracts the 8-byte tunnel header (and reserves another
+  2 bytes if offering ARQ) from its actual
   maximum DTLS payload and applies this ceiling. Both ends confirm the smaller
   offer before enabling data and updating their adapters. `MTU_OFFER` and
   `READY` log the calculation and selected value. Use `mtu=1280` to retain the
   previous inner packet size. This is capacity negotiation, not path MTU discovery.
+- `arq`: `0` (default) or `1`. Both updated peers must set `arq=1` to enable
+  recovery; tagged clients use e.g. `work.arq=1`. With only one updated peer
+  opting in, negotiation falls back to ordinary DATA. An older binary that
+  does not recognize the ARQ capability must be upgraded before opting in.
+  No change is needed in `core`. Start with `mtu=1280` when comparing performance.
+- `arq_log`: `0` (default) or `1`. Enable on both ends for short diagnostics;
+  tagged clients use e.g. `work.arq_log=1`. This is independent of `stats_interval`.
+  `ARQ_EVENT` lines include wall-clock seconds, monotonic milliseconds, direction
+  and a local session identifier. Events trace gap detection/filling/expiry,
+  timer start/expiry/rearm/cancellation, NACK send/receive, queued/sent/skipped
+  repairs, watermark exchange and session clearing. `gap_detect` reports the
+  missing range; NACK previews show at most 16 sequence numbers with an omitted
+  count. `repair_skip` explains cooldown, retry limits, budget and cache misses.
+  No keys or packet contents are logged. Logging can affect timing, so disable
+  it for throughput comparisons. A `gap_filled` event may still be a late original;
+  correlate sequence numbers with the sender's `repair_sent` events when debugging.
 - `stats_interval`: seconds between `LIVE_STATS` lines (0 disables, default).
   Set to 1 on both ends for diagnostics; for a tagged client use
   `work.stats_interval=1` with the actual tag. Counters are cumulative.
@@ -164,6 +182,10 @@ are installed. Ctrl+C performs cleanup.
   `win_oversize` counts Windows adapter read drops, and
   `win_ring_full`/`win_write_err` split injection failures. A full adapter
   read queue leaves the backlog in the Wintun ring instead of dropping it.
+  `ARQ_STATS` reports feedback packets, requested sequence numbers, actual
+  retransmissions, duplicates, expiry, cache misses and budget suppression.
+  `gap_filled` means arrival after requesting a missing packet; a late original
+  can also fill that gap, so it does not by itself prove a retransmission helped.
 
 On Linux, optional server settings `PostUp` and `PostDown` run trusted shell
 commands with the server's privileges. `PostUp` runs after the TUN interface
@@ -203,6 +225,8 @@ exclusive DNS or provide a kill switch. Restart after changing uplinks.
 `make test` covers real UDP loopback, forced-suite DTLS interoperability,
 handshake loss/timeouts, wrong keys/identities, replay/tampering, reordering,
 send backpressure, receive bounds, IPv4 validation and address authorization.
+It also runs ARQ tests through real DTLS records: feedback/repair loss,
+exponential timers, expiry, deduplication, and 70,000 messages across 16-bit rollover.
 `python3 tests/config_test.py` checks CLI and configuration rejection paths
 without modifying the network.
 `python3 tests/mtu_test.py` checks automatic/unequal MTU ceilings and READY
@@ -212,6 +236,10 @@ On Linux as root, with `iproute2`, `nftables`, `ping` and Python 3 installed:
 
 ```sh
 python3 tests/integration_linux.py
+# Optional: real TUN forwarding with ARQ and bidirectional injected 3% loss.
+XTUN_TEST_ARQ=1 python3 tests/integration_linux.py
+# Also validate gap/timer event logs under injected loss.
+XTUN_TEST_ARQ=1 XTUN_TEST_ARQ_LOG=1 python3 tests/integration_linux.py
 ```
 
 It creates three temporary network namespaces, tests TUN ICMP, forwarding,
@@ -266,21 +294,51 @@ either direction and application queues; it is not one-way WAN packet loss.
 
 DTLS authenticates and encrypts the complete application message. Its record
 sequence numbers, nonce construction, replay window and handshake retransmits
-are managed by mbedTLS. There is no custom encryption or data retransmission.
-Inner TCP provides its own reliable delivery; inner UDP remains best effort.
+are managed by mbedTLS. There is no custom encryption. DATA recovery is disabled
+by default and remains best effort when enabled. Inner TCP retains its own
+reliable delivery; ARQ does not guarantee prevention of TCP congestion responses.
 
 Each application message has an 8-byte header: version (u8, currently 1), type
 (u8), reserved flags (u16, zero), payload length (u32, big endian). Types are
 READY=1, DATA=2, PING=3, PONG=4 and CLOSE=5. DATA contains exactly one IPv4
 packet. READY carries the sender and expected peer IPv4 addresses (u32 each,
 network order), local MTU offer (u16), confirmed MTU (u16, initially zero),
-MTU negotiation version (u8, currently 1), and three zero bytes: 16 bytes total.
+MTU negotiation version (u8, currently 1), ARQ offer (u8, 0/1), ARQ confirmation
+(u8, 0/1), and one zero byte: 16 bytes total. ARQ is selected only if both offer it.
 The confirmed MTU must equal the smaller of the two offers. DATA is enabled
 only after receiving the peer's confirmation; READY is retried until then.
 Both ends must be updated: the older 12-byte READY format is rejected.
 PING/PONG carry eight
 opaque bytes; CLOSE has no payload. Control messages and unknown versions
 never reach the virtual adapter.
+
+When ARQ is enabled, ARQ_DATA=6 contains a big-endian 16-bit sequence followed
+by one IPv4 packet; ARQ_NACK=7 contains up to 512 missing 16-bit sequences;
+ARQ_MARK=8 contains only the last successfully sent DATA sequence (16 bits).
+Each direction starts at 1, wraps through zero, and keeps its own sequence space.
+Repairs reuse the original application sequence but are encrypted into a fresh
+DTLS record. There are no positive ACKs and no global in-order delivery queue.
+
+The receiver batches a first NACK at the end of the receive pass when a gap
+appears, then repeats current gaps after 20, 40, 80 and at most 160 ms between
+feedback packets. New gaps merge into that timer; an empty missing set cancels
+it. Queued feedback is refreshed before encryption; an outstanding DTLS write
+is always retried unchanged. Each sender advertises its watermark every 200 ms
+while it has sent DATA within the last second, repeating unchanged watermarks
+to expose tail loss; idle connections stop advertising after that period.
+
+Recovery uses a fixed 1024-packet cache/window and a one-second eligibility
+limit, whichever is exhausted first. Only successfully sent originals enter
+the cache. Each packet can be repaired twice, with at least 100 ms between
+successful repairs. Repair messages have a plaintext byte budget of 25% of
+original message bytes plus a bounded initial burst; control and DTLS/UDP/IP
+overhead are additional. Memory per enabled peer is bounded at roughly 1.5 MiB.
+Out-of-window/ambiguous jumps cause a session reset; 16-bit serial comparison
+still requires an active sequence span below half the sequence space and cannot
+provide arbitrary-blackout reliability. Sequence/feedback state is cleared on
+session renewal. This is optional loss recovery, not a replacement for congestion
+control, path MTU discovery or application reliability. Enable only for measured
+comparisons; better video playback on a particular path is not yet established.
 
 The single server slot and its input queue are bounded. A candidate handshake
 is pinned to one source tuple for at most 15 seconds; DTLS cookies validate

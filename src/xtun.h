@@ -16,6 +16,8 @@ typedef struct {
     char post_up[2048], post_down[2048];
     unsigned port, bind_port, run_seconds, session_seconds, stats_interval;
     unsigned mtu_limit, mtu; /* configured ceiling (0 auto), active inner MTU */
+    unsigned arq; /* optional bounded DATA recovery, negotiated with peer */
+    unsigned arq_log; /* opt-in event tracing; never logs payloads or keys */
     uint32_t address, peer_address, endpoint_address, dns_address;
     unsigned char key[32];
     XtRoute routes[XT_MAX_ROUTES]; unsigned route_count;

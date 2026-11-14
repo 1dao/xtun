@@ -1,0 +1,231 @@
+/* Include the owner to test its real queue/timer state without test-only APIs. */
+#include "../src/tunnel.c"
+#include <assert.h>
+#ifdef _WIN32
+#include <io.h>
+#define dup _dup
+#define dup2 _dup2
+#define close _close
+#else
+#include <unistd.h>
+#endif
+
+typedef struct {
+    Tunnel *t, *peer;
+    int block, drop;
+    unsigned sent;
+    unsigned char cipher[XDTLS_MAX_RECORD]; size_t len;
+} Link;
+typedef struct { XtConfig ca, cb; Tunnel *a, *b; Link ab, ba; } Pair;
+static int output(void *p, const unsigned char *bytes, size_t n) {
+    Link *l = p;
+    if (l->block) { --l->block; return XDTLS_AGAIN; }
+    ++l->sent; memcpy(l->cipher, bytes, n); l->len=n;
+    if (l->drop) { --l->drop; return (int)n; }
+    assert(!xdtls_feed(l->peer->dtls, bytes, n)); return (int)n;
+}
+static void init(Pair *p) {
+    memset(p, 0, sizeof(*p));
+    p->a=calloc(1, sizeof(Tunnel)); p->b=calloc(1, sizeof(Tunnel)); assert(p->a && p->b);
+    p->a->cfg=&p->ca; p->b->cfg=&p->cb;
+    p->ca.probe=p->cb.probe=1; p->ca.mtu=p->cb.mtu=XT_MTU;
+    p->ab=(Link){.t=p->a,.peer=p->b}; p->ba=(Link){.t=p->b,.peer=p->a};
+    unsigned char key[32]; memset(key, 0x51, sizeof(key)); char error[256];
+    xDtlsConfig c={0}; c.psk=key; c.identity="arq-test"; c.send=output; c.userdata=&p->ab;
+    p->a->dtls=xdtls_create(&c,error); assert(p->a->dtls);
+    c.server=1; c.transport_id="test"; c.transport_id_len=4; c.userdata=&p->ba;
+    p->b->dtls=xdtls_create(&c,error); assert(p->b->dtls);
+    for (uint64_t now=0; now<10000; now+=10) {
+        assert(xdtls_step(p->a->dtls,now)>=0 && xdtls_step(p->b->dtls,now)>=0);
+        if (xdtls_ready(p->a->dtls) && xdtls_ready(p->b->dtls)) break;
+    }
+    assert(xdtls_ready(p->a->dtls) && xdtls_ready(p->b->dtls));
+    p->a->now=p->b->now=10000; p->a->active=p->b->active=1;
+    p->a->arq=calloc(1,sizeof(Arq)); p->b->arq=calloc(1,sizeof(Arq));
+    assert(p->a->arq && p->b->arq);
+    p->a->arq->credit=p->b->arq->credit=4*XT_MTU_MAX;
+}
+static void finish(Pair *p) {
+    xdtls_destroy(p->a->dtls); xdtls_destroy(p->b->dtls);
+    free(p->a->arq); free(p->b->arq); free(p->a); free(p->b);
+}
+static void send_data(Tunnel *t) {
+    assert(enqueue(t,DATA,"packet",6)); assert(flush(t,XT_QUEUE));
+}
+static int take_data(Tunnel *t, uint16_t expected) {
+    unsigned char out[2048]; int n=xdtls_read(t->dtls,out,sizeof(out));
+    assert(n==XT_HEADER+2+6 && out[1]==ARQ_DATA && be16(out+8)==expected);
+    assert(!memcmp(out+10,"packet",6));
+    int rc=arq_receive(t,expected,0);
+    if (rc==1) assert(arq_receive(t,expected,1)==1);
+    return rc;
+}
+static void control(Tunnel *t) { assert(receive_messages(t)); }
+static void feedback(Tunnel *t) { arq_tick(t); assert(flush(t,XT_QUEUE)); }
+static void timer_test(void) {
+    Pair p; init(&p); Tunnel *b=p.b;
+    assert(arq_receive(b,2,1)==1); assert(b->arq->missing==1);
+    const unsigned times[]={0,20,60,140,300,460};
+    for (unsigned i=0;i<sizeof(times)/sizeof(times[0]);++i) {
+        if (i) { b->now=10000+times[i]-1; arq_tick(b); assert(!b->count); }
+        b->now=10000+times[i]; feedback(b); control(p.a);
+        assert(b->arq_nacks==i+1 && b->arq->timer);
+    }
+    /* A new gap joins the existing timer without postponing its deadline. */
+    uint64_t due=b->arq->nack_due;
+    assert(arq_receive(b,4,1)==1); arq_tick(b); assert(b->arq->nack_due==due);
+    assert(arq_receive(b,1,1)==1 && arq_receive(b,3,1)==1);
+    assert(!b->arq->missing && !b->arq->timer);
+    b->now+=100; arq_tick(b); assert(!b->count);
+    /* Resolve a gap while feedback is queued: cancel before encrypting it. */
+    assert(arq_receive(b,6,1)==1); arq_tick(b); assert(b->count==1);
+    unsigned before=p.ba.sent;
+    assert(arq_receive(b,5,1)==1); assert(flush(b,XT_QUEUE));
+    assert(p.ba.sent==before && !b->count && !b->arq->nack_queued);
+    finish(&p); puts("PASS immediate batched NACK, 20/40/80/160ms backoff, merge and cancellation");
+}
+static void recovery_test(void) {
+    Pair p; init(&p);
+    send_data(p.a); assert(take_data(p.b,1)==1);
+    p.ab.drop=1; send_data(p.a); send_data(p.a); assert(take_data(p.b,3)==1);
+    p.ba.drop=1; feedback(p.b); /* first NACK is lost */
+    p.b->now+=20; feedback(p.b); control(p.a); assert(p.a->count==1);
+    arq_request(p.a,2); assert(p.a->count==1); /* duplicate request cannot queue twice */
+    p.ab.block=1; assert(flush(p.a,1)); assert(xdtls_write_pending(p.a->dtls));
+    size_t pending=p.a->queue[p.a->head].len;
+    assert(receive_messages(p.a)); assert(p.a->queue[p.a->head].len==pending);
+    p.ab.drop=1; assert(flush(p.a,1)); /* first retransmission is lost */
+    assert(p.a->arq_retransmits==1);
+    p.b->now+=40; feedback(p.b); control(p.a); assert(!p.a->count); /* cooldown */
+    p.a->now+=140; p.b->now=10140; feedback(p.b); control(p.a);
+    assert(p.a->count==1 && flush(p.a,1)); assert(take_data(p.b,2)==1);
+    assert(!p.b->arq->missing && !p.b->arq->timer && p.a->arq_retransmits==2);
+    arq_request(p.a,2); assert(!p.a->count); /* actual retry limit */
+    /* Fresh DTLS records can carry a duplicate app sequence, delivered once. */
+    ArqTx *cached=&p.a->arq->tx[2];
+    assert(enqueue(p.a,ARQ_DATA,cached->bytes,cached->len));
+    p.a->queue[p.a->head].retry=1; p.a->queue[p.a->head].expires=11000;
+    assert(flush(p.a,1)); assert(take_data(p.b,2)==0);
+    assert(!xdtls_feed(p.b->dtls,p.ab.cipher,p.ab.len));
+    unsigned char out[2048]; assert(xdtls_read(p.b->dtls,out,sizeof(out))==XDTLS_AGAIN);
+    finish(&p); puts("PASS lost NACK/lost repair recovery, write backpressure, cooldown, retry limit and deduplication");
+}
+static void watermark_test(void) {
+    Pair p; init(&p); p.ab.drop=1; send_data(p.a);
+    p.a->now+=199; arq_tick(p.a); assert(!p.a->count);
+    ++p.a->now; feedback(p.a); control(p.b); assert(p.b->arq->missing==1);
+    feedback(p.b); control(p.a); assert(p.a->count==1 && flush(p.a,1));
+    assert(take_data(p.b,1)==1); /* no later DATA was needed */
+    p.a->now+=200; feedback(p.a); control(p.b); assert(!p.b->arq->missing);
+    p.a->now=11200; arq_tick(p.a); assert(!p.a->count); /* stop after cache lifetime */
+    finish(&p); puts("PASS 200ms sender-only watermark, tail recovery and idle suppression");
+}
+static void wrap_test(void) {
+    Pair p; init(&p);
+    for (unsigned i=1;i<=70000;++i) {
+        if (i==65536) p.ab.drop=1;
+        send_data(p.a);
+        if (i==65536) continue;
+        assert(take_data(p.b,(uint16_t)i)==1);
+        if (i==65537) {
+            assert(p.b->arq->missing==1); feedback(p.b); control(p.a);
+            assert(flush(p.a,1)); assert(take_data(p.b,0)==1);
+            assert(p.b->arq->rx[0].seq==65536 && !p.b->arq->missing);
+        }
+    }
+    assert(p.a->arq->sent==70000 && p.b->arq->high==70000);
+    assert(arq_receive(p.b,(uint16_t)70000,1)==0);
+    assert(arq_receive(p.b,(uint16_t)(70000+32768),1)==-1);
+    assert(arq_receive(p.b,(uint16_t)(70000+ARQ_WINDOW),1)==-1);
+    arq_request(p.a,1); assert(!p.a->count && p.a->arq_cache_miss);
+    finish(&p); puts("PASS 70,000 DATA messages, 16-bit rollover including lost zero, bounded cache and ambiguous jump rejection");
+}
+static void bounds_test(void) {
+    Pair p; init(&p); send_data(p.a); assert(take_data(p.b,1)==1);
+    p.a->arq->credit=0; arq_request(p.a,1); assert(!p.a->count && p.a->arq_limited==1);
+    p.a->arq->credit=10000; arq_request(p.a,1); assert(p.a->count==1);
+    p.a->now+=ARQ_TTL; assert(flush(p.a,1));
+    assert(!p.a->count && !p.a->arq_retransmits && !p.a->arq->tx[1].queued);
+    arq_request(p.a,1); assert(!p.a->count && p.a->arq_cache_miss==1);
+    assert(arq_receive(p.b,3,0)==1); /* failed TUN injection stays missing */
+    assert(p.b->arq->missing==2);
+    p.b->now+=ARQ_TTL; feedback(p.b);
+    assert(!p.b->arq->missing && !p.b->arq->timer && !p.b->count);
+    finish(&p); puts("PASS byte budget, repair expiry, local delivery failure and timer expiry");
+}
+static void queued_test(void) {
+    Pair p; init(&p);
+    assert(arq_receive(p.b,2,1)==1); arq_tick(p.b);
+    p.ba.block=1; assert(flush(p.b,1)); assert(xdtls_write_pending(p.b->dtls));
+    unsigned char saved[XT_HEADER+2*ARQ_BATCH]; size_t len=p.b->queue[p.b->head].len;
+    memcpy(saved,p.b->queue[p.b->head].bytes,len);
+    assert(arq_receive(p.b,1,1)==1 && !p.b->arq->timer);
+    assert(flush(p.b,1)); assert(!memcmp(saved,p.b->queue[p.b->head ? p.b->head-1 : XT_QUEUE-1].bytes,len));
+    control(p.a); assert(p.b->arq_nacks==1 && !p.b->arq->timer);
+    send_data(p.a); assert(take_data(p.b,1)==0);
+    arq_request(p.a,1); p.ab.block=1; assert(flush(p.a,1));
+    assert(xdtls_write_pending(p.a->dtls));
+    p.a->now+=ARQ_TTL;
+    assert(flush(p.a,1)); assert(!xdtls_write_pending(p.a->dtls) && p.a->arq_retransmits==1);
+    assert(take_data(p.b,1)==0);
+    finish(&p); puts("PASS pending NACK/repair stays immutable across gap cancellation and expiry");
+}
+static void batch_test(void) {
+    Pair p; init(&p);
+    assert(arq_receive(p.b,600,1)==1 && p.b->arq->missing==599);
+    feedback(p.b); control(p.a); assert(p.a->arq_requests==ARQ_BATCH);
+    p.b->now+=20; feedback(p.b); control(p.a);
+    assert(p.b->arq->rx[599].requested); /* later gaps are not starved by the first batch */
+    p.b->now+=ARQ_TTL; feedback(p.b); assert(!p.b->count && !p.b->arq->missing);
+    unsigned char malformed[XT_HEADER+2*ARQ_BATCH+2]={1,ARQ_NACK,0,0};
+    put32(malformed+4,1);
+    assert(xdtls_write(p.a->dtls,malformed,XT_HEADER+1)==XT_HEADER+1); control(p.b);
+    put32(malformed+4,2*ARQ_BATCH+2);
+    assert(xdtls_write(p.a->dtls,malformed,sizeof(malformed))==sizeof(malformed)); control(p.b);
+    malformed[1]=ARQ_MARK; put32(malformed+4,3);
+    assert(xdtls_write(p.a->dtls,malformed,XT_HEADER+3)==XT_HEADER+3); control(p.b);
+    assert(p.b->drop_frame==3);
+    finish(&p); puts("PASS bounded batched feedback, fair rotation, mass expiry and malformed control rejection");
+}
+static void logging_test(void) {
+    Pair p; init(&p); FILE *trace=tmpfile(); assert(trace);
+    fflush(stdout); int saved=dup(fileno(stdout)); assert(saved>=0);
+    assert(dup2(fileno(trace),fileno(stdout))>=0);
+    arq_log(p.a,"disabled","value=1");
+    p.ca.arq_log=p.cb.arq_log=1; p.cb.server=1;
+    send_data(p.a); assert(take_data(p.b,1)==1);
+    p.ab.drop=1; send_data(p.a); send_data(p.a); assert(take_data(p.b,3)==1);
+    p.ba.drop=1; feedback(p.b); /* exercise timer expiry after lost feedback */
+    p.b->now+=20; feedback(p.b); control(p.a);
+    assert(flush(p.a,1)); assert(take_data(p.b,2)==1);
+    p.a->now+=200; feedback(p.a); control(p.b);
+    p.ab.drop=1; send_data(p.a); /* tail gap is exposed by the watermark */
+    p.a->now+=200; feedback(p.a); control(p.b); feedback(p.b); control(p.a);
+    p.b->now+=ARQ_TTL; feedback(p.b);
+    unsigned char seqs[40]; for (unsigned i=0;i<20;++i) put16(seqs+2*i,(uint16_t)i);
+    arq_log_batch(p.b,"preview",seqs,20);
+    reset(p.b);
+    fflush(stdout); assert(dup2(saved,fileno(stdout))>=0); close(saved);
+    rewind(trace); char text[32768]; size_t n=fread(text,1,sizeof(text)-1,trace); text[n]=0; fclose(trace);
+    const char *events[]={"gap_detect","gap_filled","timer_start","timer_expire","timer_arm","timer_cancel",
+                          "nack_sent","nack_received","repair_queued","repair_sent","mark_sent","mark_received",
+                          "gap_expired","session_clear"};
+    for (unsigned i=0;i<sizeof(events)/sizeof(events[0]);++i) {
+        char expected[64]; snprintf(expected,sizeof(expected),"event=%s ",events[i]);
+        if (!strstr(text,expected)) fprintf(stderr,"Missing %s in trace:\n%s",expected,text);
+        assert(strstr(text,expected));
+    }
+    assert(strstr(text,"trigger=data first=2 last=2 count=1"));
+    assert(strstr(text,"trigger=watermark"));
+    assert(strstr(text,"seqs=2 omitted=0"));
+    assert(strstr(text,"delay_ms=20") && strstr(text,"delay_ms=40"));
+    assert(strstr(text,"reason=gap_filled") && strstr(text,"reason=expired"));
+    assert(strstr(text,"side=server") && strstr(text,"mono_ms=") && strstr(text,"omitted=4"));
+    assert(!strstr(text,"event=disabled") && !strstr(text,"packet"));
+    finish(&p); puts("PASS optional ARQ logs trace real recovery/timer events, bound previews and omit payloads");
+}
+int main(void) {
+    timer_test(); recovery_test(); watermark_test(); wrap_test(); bounds_test(); queued_test(); batch_test();
+    logging_test();
+    puts("ALL ARQ TESTS PASSED"); return 0;
+}

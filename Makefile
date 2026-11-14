@@ -27,8 +27,9 @@ $(BIN_DIR)/platform_windows_test.exe: tests/platform_windows_test.c src/platform
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(CORE_OBJS) $(LDLIBS) -o $@
 endif
-test: $(BIN_DIR)/dtls_test$(EXT) $(PLATFORM_TEST)
+test: $(BIN_DIR)/dtls_test$(EXT) $(BIN_DIR)/arq_test$(EXT) $(PLATFORM_TEST)
 	./$(BIN_DIR)/dtls_test$(EXT)
+	./$(BIN_DIR)/arq_test$(EXT)
 ifeq ($(OS),Windows_NT)
 	./$(BIN_DIR)/platform_windows_test.exe
 endif
@@ -46,6 +47,9 @@ $(BUILD)/mbedtls.a: $(MBED_OBJS)
 $(BIN_DIR)/dtls_test$(EXT): tests/dtls_test.c src/xtun.h $(TEST_APP_OBJS) $(CORE_OBJS) $(BUILD)/mbedtls.a
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(TEST_APP_OBJS) $(CORE_OBJS) $(BUILD)/mbedtls.a $(LDLIBS) -o $@
+$(BIN_DIR)/arq_test$(EXT): tests/arq_test.c src/tunnel.c src/xtun.h $(TEST_APP_OBJS) $(CORE_OBJS) $(BUILD)/mbedtls.a
+	@mkdir -p $(BIN_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(filter-out $(BUILD)/app/tunnel.o,$(TEST_APP_OBJS)) $(CORE_OBJS) $(BUILD)/mbedtls.a $(LDLIBS) -o $@
 $(BIN_DIR)/xtun$(EXT): $(APP_OBJS) $(CORE_OBJS) $(BUILD)/mbedtls.a
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(CFLAGS) $(APP_OBJS) $(CORE_OBJS) $(BUILD)/mbedtls.a $(LDLIBS) -o $@
@@ -66,7 +70,7 @@ gui:
 	@echo "The XTun GUI is available on Windows." && exit 1
 endif
 clean:
-	$(RM) $(BUILD)/core/*.o $(BUILD)/core/*.d $(BUILD)/app/*.o $(BUILD)/app/*.d $(BUILD)/mbed/*.o $(BUILD)/mbed/*.d $(BUILD)/mbedtls.a $(BIN_DIR)/xtun$(EXT) $(BIN_DIR)/dtls_test$(EXT)
+	$(RM) $(BUILD)/core/*.o $(BUILD)/core/*.d $(BUILD)/app/*.o $(BUILD)/app/*.d $(BUILD)/mbed/*.o $(BUILD)/mbed/*.d $(BUILD)/mbedtls.a $(BIN_DIR)/xtun$(EXT) $(BIN_DIR)/dtls_test$(EXT) $(BIN_DIR)/arq_test$(EXT)
 ifeq ($(OS),Windows_NT)
 	$(RM) $(BIN_DIR)/xtun-gui.exe $(BIN_DIR)/raygui-notices.txt $(BIN_DIR)/platform_windows_test.exe
 endif

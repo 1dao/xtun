@@ -12,6 +12,8 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 BIN = Path(os.environ.get("XTUN_BIN", str(ROOT / "bin/xtun"))).resolve()
 PORT = int(os.environ.get("XTUN_TEST_PORT", "51215"))
+ARQ = int(os.environ.get("XTUN_TEST_ARQ", "0"))
+ARQ_LOG = int(os.environ.get("XTUN_TEST_ARQ_LOG", "0"))
 
 def run(*args, **kwargs):
     result = subprocess.run(args, text=True, capture_output=True, **kwargs)
@@ -56,7 +58,8 @@ def main():
                 ns(name, "ip", "link", "set", interface, "up")
         run(str(BIN), "keygen", str(directory / "peer.key"))
         def config(path, **values):
-            values.update(identity="integration-peer", psk=(directory/"peer.key").read_text(), run_seconds=60, session_seconds=30)
+            values.update(identity="integration-peer", psk=(directory/"peer.key").read_text(), run_seconds=90,
+                          session_seconds=30, arq=ARQ, arq_log=ARQ_LOG)
             entries = [f"{key}={','.join(value) if isinstance(value,list) else value}"
                        for key, value in values.items()]
             path.write_text("\n".join(entries)+"\n")
@@ -83,6 +86,7 @@ def main():
                 raise AssertionError("tunnel did not become ready\n"+contents(sl)+contents(cl))
             time.sleep(.05)
         print("PASS real TUN adapters and encrypted READY", flush=True)
+        assert f"arq={ARQ}" in contents(sl) and f"arq={ARQ}" in contents(cl)
         for name, log in ((client, cl), (server, sl)):
             assert "mtu=1330 " in contents(log), contents(log)
             assert '"mtu":1330' in ns(name,"ip","-j","link","show","xtun0").stdout.replace(" ", "")
@@ -93,6 +97,11 @@ def main():
         ns(client,"ping","-n","-c","3","-W","2","198.19.0.2")
         ns(client,"ping","-n","-c","1","-W","2","-s","3000","198.19.0.2")
         print("PASS isolated forwarding/NAT, including fragmented IPv4",flush=True)
+        if ARQ:
+            # Only test-owned namespace links are affected; the host and live
+            # server remain untouched. Exercise real encrypted loss in both directions.
+            ns(client,"tc","qdisc","add","dev","xca"+tag,"root","netem","loss","3%","delay","10ms")
+            ns(server,"tc","qdisc","add","dev","xsa"+tag,"root","netem","loss","3%","delay","10ms")
         # Distinct endpoints test TCP delivery and UDP datagram semantics through NAT.
         tcp_server = """import socket,hashlib
 s=socket.socket();s.bind(('198.19.0.2',9001));s.listen();c,a=s.accept();h=hashlib.sha256()
@@ -127,6 +136,9 @@ u.close()
         tp.wait(timeout=5);up.wait(timeout=5)
         assert tp.returncode==up.returncode==0
         print(f"PASS TCP 2 MiB SHA-256 and 20 binary UDP round trips ({time.monotonic()-before:.2f}s)",flush=True)
+        if ARQ:
+            for name, interface in ((client,"xca"+tag),(server,"xsa"+tag)):
+                ns(name,"tc","qdisc","del","dev",interface,"root")
         # Test a clean session renewal without re-installing/removing existing routes.
         deadline = time.monotonic()+40
         while contents(sl).count("READY ") < 2 or contents(cl).count("READY ") < 2:
@@ -169,6 +181,17 @@ u.close()
             # IPv4-only adapters intentionally reject other host-generated IP
             # traffic (such as IPv6 control packets); keep those counts visible.
             print(text.strip())
+        if ARQ:
+            text="\n".join(contents(log) for log in logs)
+            repairs=sum(int(n) for n in re.findall(r"ARQ_STATS .*?retransmits=(\d+)",text))
+            filled=sum(int(n) for n in re.findall(r"ARQ_STATS .*?gap_filled=(\d+)",text))
+            assert repairs > 0 and filled > 0, text
+            print(f"PASS ARQ with bidirectional 3% loss: retransmits={repairs} gap_filled={filled}",flush=True)
+            if ARQ_LOG:
+                for event in ("gap_detect","timer_start","timer_expire","timer_arm","nack_sent",
+                              "nack_received","repair_sent","gap_filled","timer_cancel"):
+                    assert f"event={event} " in text, event
+                print("PASS real TUN ARQ event logs cover gaps, timers, feedback, repairs and cancellation",flush=True)
         print("LINUX INTEGRATION PASSED",flush=True)
     finally:
         for p in processes:
