@@ -1,9 +1,33 @@
-#ifndef XTUN_CONFIG_TAGS_H
-#define XTUN_CONFIG_TAGS_H
+#ifndef XTUN_CONFIG_H
+#define XTUN_CONFIG_H
 
+#include <stdint.h>
 #include "xargs.h"
 #include <stdio.h>
 #include <string.h>
+
+#define XT_MAX_ROUTES 16
+#define XT_CLIENT_CONFIG "client.cfg"
+#define XT_SERVER_CONFIG "server.cfg"
+
+typedef struct { uint32_t network, mask; unsigned prefix; } XtRoute;
+typedef struct {
+    int server, check, probe, full_tunnel, managed;
+    char bind_ip[64], remote_ip[64], identity[65], name[32];
+    char post_up[2048], post_down[2048];
+    unsigned port, bind_port, run_seconds, session_seconds, stats_interval;
+    unsigned mtu_limit, mtu; /* configured ceiling (0 auto), active inner MTU */
+    unsigned arq; /* optional bounded DATA recovery, negotiated with peer */
+    unsigned arq_log; /* opt-in event tracing; never logs payloads or keys */
+    uint32_t address, peer_address, endpoint_address, dns_address;
+    unsigned char key[32];
+    XtRoute routes[XT_MAX_ROUTES]; unsigned route_count;
+    XtRoute local_networks[XT_MAX_ROUTES]; unsigned local_count;
+} XtConfig;
+int xt_parse_ip(const char *, uint32_t *);
+int xt_load_config(XtConfig *, const char *, const char *tag);
+int xt_parse_route(const char *, XtRoute *);
+int xt_allowed(const XtConfig *, uint32_t);
 
 enum { XT_TAG_LIMIT = 64, XT_TAG_SIZE = 32 };
 typedef char XtTag[XT_TAG_SIZE];

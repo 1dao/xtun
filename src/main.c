@@ -1,5 +1,5 @@
 #include "xsock.h"
-#include "config_tags.h"
+#include "config.h"
 #include "xtun.h"
 #include <stdio.h>
 #include <string.h>

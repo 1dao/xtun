@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "process.h"
-#include "config_tags.h"
+#include "config.h"
 #include "xtun.h"
 
 static HANDLE child, control, output;

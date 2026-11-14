@@ -1,7 +1,7 @@
 #ifndef XTUN_UI_CLIENT_CONFIG_H
 #define XTUN_UI_CLIENT_CONFIG_H
 
-#include "config_tags.h"
+#include "config.h"
 
 enum { PROFILE_LIMIT = XT_TAG_LIMIT, PROFILE_PATH = 260, PROFILE_NAME = 128 };
 typedef struct {
