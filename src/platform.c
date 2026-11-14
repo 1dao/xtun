@@ -24,6 +24,7 @@ struct XtDevice {
     BYTE *(WINAPI *AllocateSendPacket)(void *, DWORD);
     void (WINAPI *SendPacket)(void *, BYTE *);
     HANDLE stop, room, thread;
+    SOCKET_T wake[2];
     CRITICAL_SECTION lock;
     NET_LUID luid;
     MIB_UNICASTIPADDRESS_ROW address;
@@ -62,6 +63,26 @@ static BOOL WINAPI console_signal(DWORD type) {
     return FALSE;
 }
 void xt_install_signals(void) { signal(SIGINT, on_signal); signal(SIGTERM, on_signal); SetConsoleCtrlHandler(console_signal, TRUE); }
+static int wake_init(XtDevice *d, char error[256]) {
+    if (xsock_socketpair(error, d->wake) != XSOCK_OK) return 0;
+    return xsock_set_nonblock(error, d->wake[0]) == XSOCK_OK &&
+           xsock_set_nonblock(error, d->wake[1]) == XSOCK_OK;
+}
+/* Called under lock. One byte represents each empty-to-nonempty transition;
+ * xt_device_read drains notifications under the same lock when the queue empties. */
+static void wake_signal(XtDevice *d) {
+    if (send(d->wake[0], "x", 1, 0) != 1) {
+        if (WSAGetLastError() == WSAEWOULDBLOCK) return; /* already signalled */
+        d->failed = 1;
+        shutdown(d->wake[0], SD_SEND); /* EOF also wakes the main loop */
+    }
+}
+static void reader_failed(XtDevice *d) {
+    EnterCriticalSection(&d->lock);
+    d->failed = 1;
+    if (!d->count) wake_signal(d);
+    LeaveCriticalSection(&d->lock);
+}
 static DWORD WINAPI reader(void *p) {
     XtDevice *d = p; HANDLE waits[2] = {d->stop, d->GetReadWaitEvent(d->session)};
     while (WaitForSingleObject(d->stop, 0) == WAIT_TIMEOUT) {
@@ -73,15 +94,15 @@ static DWORD WINAPI reader(void *p) {
         if (queued >= 64) {
             HANDLE room[2] = {d->stop, d->room};
             if (WaitForMultipleObjects(2, room, FALSE, INFINITE) == WAIT_FAILED) {
-                EnterCriticalSection(&d->lock); d->failed = 1; LeaveCriticalSection(&d->lock); break;
+                reader_failed(d); break;
             }
             continue;
         }
         DWORD n; BYTE *packet = d->ReceivePacket(d->session, &n);
         if (!packet) {
-            if (GetLastError() != ERROR_NO_MORE_ITEMS) { EnterCriticalSection(&d->lock); d->failed = 1; LeaveCriticalSection(&d->lock); break; }
+            if (GetLastError() != ERROR_NO_MORE_ITEMS) { reader_failed(d); break; }
             if (WaitForMultipleObjects(2, waits, FALSE, INFINITE) == WAIT_FAILED) {
-                EnterCriticalSection(&d->lock); d->failed = 1; LeaveCriticalSection(&d->lock); break;
+                reader_failed(d); break;
             }
             continue;
         }
@@ -90,6 +111,7 @@ static DWORD WINAPI reader(void *p) {
         if (n <= XT_MTU) {
             unsigned tail = (d->head+d->count) % 64;
             memcpy(d->queue[tail].bytes, packet, n); d->queue[tail].n = n; ++d->count;
+            if (d->count == 1) wake_signal(d);
         } else ++d->stats.oversize;
         LeaveCriticalSection(&d->lock);
         d->ReleaseReceivePacket(d->session, packet);
@@ -99,6 +121,7 @@ static DWORD WINAPI reader(void *p) {
 XtDevice *xt_device_open(const XtConfig *c, char error[256]) {
     XtDevice *d = calloc(1, sizeof(*d));
     if (!d) return NULL;
+    d->wake[0] = d->wake[1] = INVALID_SOCKET_VAL;
     InitializeCriticalSection(&d->lock);
     WCHAR path[2048], name[32];
     DWORD length = GetModuleFileNameW(NULL, path, 2048);
@@ -139,6 +162,7 @@ XtDevice *xt_device_open(const XtConfig *c, char error[256]) {
     if (!d->stop) goto bad;
     d->room = CreateEventW(NULL, FALSE, FALSE, NULL);
     if (!d->room) goto bad;
+    if (!wake_init(d, error)) goto bad;
     d->thread = CreateThread(NULL, 0, reader, d, 0, NULL);
     if (!d->thread) goto bad;
     return d;
@@ -266,8 +290,16 @@ int xt_device_read(XtDevice *d, void *out, size_t cap) {
         d->head = (d->head+1) % 64; --d->count;
         if (d->count == 63) SetEvent(d->room);
     }
+    if (!d->count && !d->failed) {
+        char tokens[64]; int rc;
+        do { rc = recv(d->wake[1], tokens, sizeof(tokens), 0); } while (rc > 0);
+        if (!rc || WSAGetLastError() != WSAEWOULDBLOCK) { d->failed = 1; n = -1; }
+        /* A successful TCP send need not be readable yet. Any late token is
+         * drained by the next empty read, rather than treated as a TUN error. */
+    }
     LeaveCriticalSection(&d->lock); return n;
 }
+uintptr_t xt_device_fd(const XtDevice *d) { return (uintptr_t)d->wake[1]; }
 int xt_device_write(XtDevice *d, const void *bytes, size_t n) {
     BYTE *packet = d->AllocateSendPacket(d->session, (DWORD)n);
     if (!packet) {
@@ -293,6 +325,8 @@ void xt_device_close(XtDevice *d) {
     if (d->thread) { WaitForSingleObject(d->thread, INFINITE); CloseHandle(d->thread); }
     if (d->stop) CloseHandle(d->stop);
     if (d->room) CloseHandle(d->room);
+    if (d->wake[0] != INVALID_SOCKET_VAL) CLOSE_SOCKET(d->wake[0]);
+    if (d->wake[1] != INVALID_SOCKET_VAL) CLOSE_SOCKET(d->wake[1]);
     remove_routes(d);
     if (d->address_set) DeleteUnicastIpAddressEntry(&d->address);
     if (d->session) d->EndSession(d->session);

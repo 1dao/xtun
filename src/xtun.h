@@ -30,7 +30,9 @@ int xt_random(void *, size_t);
 int xt_key_write(const char *, const void *, size_t);
 XtDevice *xt_device_open(const XtConfig *, char error[256]);
 int xt_device_read(XtDevice *, void *, size_t); /* 0 no packet, -1 error */
-#ifndef _WIN32
+#ifdef _WIN32
+uintptr_t xt_device_fd(const XtDevice *); /* pollable queue wakeup socket */
+#else
 int xt_device_fd(const XtDevice *);
 #endif
 int xt_device_write(XtDevice *, const void *, size_t);

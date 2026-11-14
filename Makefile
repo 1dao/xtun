@@ -21,8 +21,17 @@ APP_OBJS := $(addprefix $(BUILD)/app/,$(addsuffix .o,main config tunnel platform
 TEST_APP_OBJS := $(filter-out $(BUILD)/app/main.o,$(APP_OBJS))
 .PHONY: all test clean gui
 all: $(BIN_DIR)/xtun$(EXT)
-test: $(BIN_DIR)/dtls_test$(EXT)
+ifeq ($(OS),Windows_NT)
+PLATFORM_TEST = $(BIN_DIR)/platform_windows_test.exe
+$(BIN_DIR)/platform_windows_test.exe: tests/platform_windows_test.c src/platform.c src/xtun.h $(CORE_OBJS)
+	@mkdir -p $(BIN_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(CORE_OBJS) $(LDLIBS) -o $@
+endif
+test: $(BIN_DIR)/dtls_test$(EXT) $(PLATFORM_TEST)
 	./$(BIN_DIR)/dtls_test$(EXT)
+ifeq ($(OS),Windows_NT)
+	./$(BIN_DIR)/platform_windows_test.exe
+endif
 $(BUILD)/mbed/%.o: $(XNET_ROOT)/3rd/mbedtls3/library/%.c
 	@mkdir -p $(BUILD)/mbed
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
@@ -59,5 +68,5 @@ endif
 clean:
 	$(RM) $(BUILD)/core/*.o $(BUILD)/core/*.d $(BUILD)/app/*.o $(BUILD)/app/*.d $(BUILD)/mbed/*.o $(BUILD)/mbed/*.d $(BUILD)/mbedtls.a $(BIN_DIR)/xtun$(EXT) $(BIN_DIR)/dtls_test$(EXT)
 ifeq ($(OS),Windows_NT)
-	$(RM) $(BIN_DIR)/xtun-gui.exe $(BIN_DIR)/raygui-notices.txt
+	$(RM) $(BIN_DIR)/xtun-gui.exe $(BIN_DIR)/raygui-notices.txt $(BIN_DIR)/platform_windows_test.exe
 endif

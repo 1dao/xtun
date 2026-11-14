@@ -209,8 +209,9 @@ int xt_run(const XtConfig *cfg) {
     uint64_t stats_period = (uint64_t)cfg->stats_interval * 1000;
     uint64_t next_stats = start + stats_period;
     char error[256]; int rc = 1;
+    int tun_watched = 0;
 #ifndef _WIN32
-    int hooks_started = 0, tun_watched = 0;
+    int hooks_started = 0;
 #endif
     xt_install_signals();
     xt_time_begin();
@@ -292,8 +293,7 @@ int xt_run(const XtConfig *cfg) {
             break;
         }
         int can_read_tun = t->dev && t->active && t->count < XT_QUEUE-4;
-#ifndef _WIN32
-        /* Read TUN in the main loop. epoll only needs to wake it, and
+        /* Read TUN in the main loop. Poll only needs to wake it, and
          * watching a readable TUN while backpressured would spin. */
         if (can_read_tun && !tun_watched) {
             if (xpoll_add_event(xt_device_fd(t->dev), XPOLL_READABLE, NULL, NULL, NULL, NULL)) {
@@ -306,7 +306,6 @@ int xt_run(const XtConfig *cfg) {
             xpoll_del_event(xt_device_fd(t->dev), XPOLL_READABLE);
             tun_watched = 0;
         }
-#endif
         xpoll_poll(can_read_tun && packets_read == XT_READ_BUDGET ? 0 : 5);
     }
     if (xt_stop) rc = 0;
@@ -335,8 +334,8 @@ done:
     if (xdtls_ready(t->dtls) && t->active && !t->count) {
         enqueue(t, CLOSE, NULL, 0); (void)flush(t, XT_QUEUE);
     }
-#ifndef _WIN32
     if (tun_watched) xpoll_del_event(xt_device_fd(t->dev), XPOLL_READABLE);
+#ifndef _WIN32
     if (hooks_started && !run_hook("PostDown", cfg->post_down, 0)) rc = 1;
 #endif
     reset(t); xt_device_close(t->dev); xudp_destroy(t->udp); xpoll_uninit(); socket_cleanup();
