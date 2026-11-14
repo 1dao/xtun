@@ -108,9 +108,13 @@ static void recovery_test(void) {
     assert(p.a->arq_retransmits==1);
     p.b->now+=40; feedback(p.b); control(p.a); assert(!p.a->count); /* cooldown */
     p.a->now+=140; p.b->now=10140; feedback(p.b); control(p.a);
+    p.ab.drop=1; assert(p.a->count==1 && flush(p.a,1)); /* second repair is also lost */
+    p.a->now+=160; p.b->now=p.a->now; feedback(p.b); control(p.a);
     assert(p.a->count==1 && flush(p.a,1)); assert(take_data(p.b,2)==1);
-    assert(!p.b->arq->missing && !p.b->arq->timer && p.a->arq_retransmits==2);
+    assert(!p.b->arq->missing && !p.b->arq->timer && p.a->arq_retransmits==3);
+    p.a->now+=160;
     arq_request(p.a,2); assert(!p.a->count); /* actual retry limit */
+    assert(p.a->arq_retry_skip==1);
     /* Fresh DTLS records can carry a duplicate app sequence, delivered once. */
     ArqTx *cached=&p.a->arq->tx[2];
     assert(enqueue(p.a,ARQ_DATA,cached->bytes,cached->len));
@@ -119,6 +123,31 @@ static void recovery_test(void) {
     assert(!xdtls_feed(p.b->dtls,p.ab.cipher,p.ab.len));
     unsigned char out[2048]; assert(xdtls_read(p.b->dtls,out,sizeof(out))==XDTLS_AGAIN);
     finish(&p); puts("PASS lost NACK/lost repair recovery, write backpressure, cooldown, retry limit and deduplication");
+}
+static void priority_test(void) {
+    Pair p; init(&p);
+    p.ab.drop=2; send_data(p.a); send_data(p.a);
+    p.a->head=XT_QUEUE-1; /* exercise rotation across the ring boundary */
+    assert(enqueue(p.a,DATA,"packet",6)); assert(enqueue(p.a,DATA,"packet",6));
+    arq_request(p.a,1); arq_request(p.a,2);
+    const unsigned order[]={1,2,3,4};
+    for (unsigned i=0;i<4;++i) {
+        assert(flush(p.a,1)); assert(take_data(p.b,(uint16_t)order[i])==1);
+    }
+    assert(p.a->arq->sent==4 && p.a->arq_retransmits==2 && !p.a->count);
+    finish(&p);
+    init(&p); p.ab.drop=1; send_data(p.a);
+    assert(enqueue(p.a,DATA,"packet",6)); assert(enqueue(p.a,DATA,"packet",6));
+    p.ab.block=1; assert(flush(p.a,1)); assert(xdtls_write_pending(p.a->dtls));
+    unsigned char saved[sizeof(p.a->queue[0])];
+    memcpy(saved,&p.a->queue[p.a->head],sizeof(saved));
+    arq_request(p.a,1); arq_prioritize_repair(p.a);
+    assert(!memcmp(saved,&p.a->queue[p.a->head],sizeof(saved)));
+    assert(flush(p.a,1)); assert(take_data(p.b,2)==1);
+    assert(flush(p.a,1)); assert(take_data(p.b,1)==1);
+    assert(flush(p.a,1)); assert(take_data(p.b,3)==1);
+    assert(p.a->arq->sent==3 && !p.a->count);
+    finish(&p); puts("PASS repair priority, ring wrap, original/repair FIFO and immutable pending DATA");
 }
 static void reorder_test(void) {
     Pair p; init(&p); Tunnel *b=p.b;
@@ -263,7 +292,7 @@ static void logging_test(void) {
     finish(&p); puts("PASS optional ARQ logs trace real recovery/timer events, bound previews and omit payloads");
 }
 int main(void) {
-    timer_test(); recovery_test(); reorder_test(); watermark_test(); wrap_test(); bounds_test(); queued_test(); batch_test();
+    timer_test(); recovery_test(); priority_test(); reorder_test(); watermark_test(); wrap_test(); bounds_test(); queued_test(); batch_test();
     logging_test();
     puts("ALL ARQ TESTS PASSED"); return 0;
 }

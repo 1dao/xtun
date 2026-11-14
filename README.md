@@ -333,8 +333,13 @@ to expose tail loss; idle connections stop advertising after that period.
 
 Recovery uses a fixed 1024-packet cache/window and a one-second eligibility
 limit, whichever is exhausted first. Only successfully sent originals enter
-the cache. Each packet can be repaired twice, with at least 100 ms between
-successful repairs. Repair messages have a plaintext byte budget of 25% of
+the cache. Each packet can be repaired up to three times. The cooldown between
+successful repairs uses 1.5 times the larger of the latest and smoothed PONG RTT,
+clamped to 20–500 ms; it defaults to 100 ms before an RTT sample is available.
+Repairs overtake unsent DATA while preserving original and repair FIFO order;
+an outstanding DTLS write is always completed unchanged. Requests blocked by
+the local byte budget or queue are retained and retried when resources permit,
+within the same cache/window and expiry limits. Repair messages have a plaintext byte budget of 25% of
 original message bytes plus a bounded initial burst; control and DTLS/UDP/IP
 overhead are additional. Memory per enabled peer is bounded at roughly 1.5 MiB.
 Out-of-window/ambiguous jumps cause a session reset; 16-bit serial comparison
