@@ -698,12 +698,14 @@ static void packed_nack_test(void) {
     finish(&p);
     /* A near-full sparse window spans two feedbacks without starving its tail. */
     init(&p);
-    assert(arq_receive(p.b,8191,1)==1);
+    assert(arq_receive(p.b,(uint16_t)(ARQ_WINDOW-1),1)==1);
     assert(arq_receive(p.b,2,1)==1);
     feedback(p.b); control(p.a);
-    assert(p.a->arq_requests==8151 && !p.b->arq->rx[8190].requested);
-    p.b->now+=ARQ_FEEDBACK_GAP; feedback(p.b); control(p.a);
-    assert(p.b->arq->rx[8190].requested && p.a->arq_requests==8189);
+    assert(p.a->arq_requests==8151 && !p.b->arq->rx[(ARQ_WINDOW-2)%ARQ_WINDOW].requested);
+    for (unsigned i=0; i<ARQ_WINDOW/8152+1 && !p.b->arq->rx[ARQ_WINDOW-2].requested; ++i) {
+        p.b->now+=ARQ_FEEDBACK_GAP; feedback(p.b); control(p.a);
+    }
+    assert(p.b->arq->rx[ARQ_WINDOW-2].requested && p.a->arq_requests==ARQ_WINDOW-3);
     finish(&p);
     puts("PASS packed NACK list/range/bitmap, rollover, malformed payloads, byte bounds and tail fairness");
 }

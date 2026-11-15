@@ -12,7 +12,7 @@
 /* Linux clamps SO_RCVBUF/SO_SNDBUF to 2x rmem_max and ignores the rest. */
 #define XT_UDP_BUFFER (4*1024*1024)
 enum { READY = 1, DATA, PING, PONG, CLOSE, ARQ_DATA, ARQ_NACK, ARQ_MARK, ARQ_NACK_PACKED, ARQ_MARK_STATE };
-#define ARQ_WINDOW 8192u
+#define ARQ_WINDOW 16384u
 _Static_assert(ARQ_WINDOW < 32768u && (65536u % ARQ_WINDOW) == 0,
                "ARQ ring must divide the wire sequence space and stay below half range");
 #define ARQ_CACHE_TTL 5000u
@@ -889,13 +889,13 @@ static void print_arq_stats(Tunnel *t) {
     printf(" defer_wait_sum_ms=%llu defer_wait_0_10_ms=%llu defer_wait_11_50_ms=%llu "
            "defer_wait_51_100_ms=%llu defer_wait_101_250_ms=%llu "
            "defer_wait_251_500_ms=%llu defer_wait_gt500_ms=%llu "
-           "order_buffered=%u order_waits=%llu order_skips=%llu order_wait_ms=%u cache_ttl_ms=%u expired_remote=%llu\n",
+           "order_buffered=%u order_waits=%llu order_skips=%llu order_wait_ms=%u cache_ttl_ms=%u expired_remote=%llu arq_window=%u\n",
            (unsigned long long)t->arq_defer_wait_sum,
            (unsigned long long)t->arq_defer_wait_bins[0],(unsigned long long)t->arq_defer_wait_bins[1],
            (unsigned long long)t->arq_defer_wait_bins[2],(unsigned long long)t->arq_defer_wait_bins[3],
            (unsigned long long)t->arq_defer_wait_bins[4],(unsigned long long)t->arq_defer_wait_bins[5],
            t->arq ? t->arq->buffered : 0,
-           (unsigned long long)t->arq_order_waits,(unsigned long long)t->arq_order_skips,ARQ_ORDER_WAIT,ARQ_CACHE_TTL,(unsigned long long)t->arq_expired_remote);
+           (unsigned long long)t->arq_order_waits,(unsigned long long)t->arq_order_skips,ARQ_ORDER_WAIT,ARQ_CACHE_TTL,(unsigned long long)t->arq_expired_remote,ARQ_WINDOW);
 }
 static void print_live_stats(Tunnel *t, uint64_t start) {
     xUdpStats udp = {0};
