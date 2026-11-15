@@ -352,7 +352,7 @@ static void watermark_test(void) {
     feedback(p.b); control(p.a); assert(p.a->count==1 && flush(p.a,1));
     assert(take_data(p.b,1)==1); /* no later DATA was needed */
     p.a->now+=200; feedback(p.a); control(p.b); assert(!p.b->arq->missing);
-    p.a->now=p.a->arq->last_data+ARQ_CACHE_TTL; arq_tick(p.a); assert(!p.a->count); /* stop after cache lifetime */
+    p.a->now=p.a->arq->last_data+2*ARQ_CACHE_TTL; arq_tick(p.a); assert(!p.a->count); /* stop after cache lifetime */
     finish(&p); puts("PASS 200ms sender-only watermark, tail recovery and idle suppression");
 }
 static void wrap_test(void) {
@@ -718,9 +718,9 @@ static void mark_feedback_test(void) {
     arq_request(p.a,1); assert(p.a->count==1);
     p.ba.block=1; assert(flush(p.b,XT_QUEUE));
     assert(xdtls_write_pending(p.b->dtls));
-    unsigned char saved[XT_HEADER+6+ARQ_NACK_BYTES];
+    unsigned char saved[XT_HEADER+12+ARQ_NACK_BYTES];
     size_t n=p.b->queue[p.b->head].len;
-    assert(p.b->queue[p.b->head].bytes[1]==ARQ_MARK && n>XT_HEADER+6);
+    assert(p.b->queue[p.b->head].bytes[1]==ARQ_MARK_STATE && n>XT_HEADER+12);
     memcpy(saved,p.b->queue[p.b->head].bytes,n);
     /* A gap filling during WANT_WRITE cannot mutate the queued MARK. */
     assert(arq_receive(p.b,3,1)==1);
@@ -748,7 +748,66 @@ static void mark_feedback_test(void) {
     finish(&p);
     puts("PASS MARK piggyback ACK/NACK, shared backoff, duplicate cancellation, immutable retries and atomic validation");
 }
+static void unavailable_mark_test(void) {
+    Pair p; init(&p); p.ab.drop=2;
+    send_data(p.a); send_data(p.a);
+    p.b->dev=(XtDevice *)p.b; delivered_count=0;
+    assert(arq_store_packet(p.b,2,"B",1)==1 && p.b->arq->missing==1);
+    p.a->arq->tx[1].born=p.a->now-ARQ_CACHE_TTL;
+    p.a->now+=ARQ_MARK_INTERVAL; p.b->now=p.a->now;
+    arq_tick(p.b); assert(p.b->arq->nack_queued);
+    arq_tick(p.a); assert(flush(p.a,XT_QUEUE)); control(p.b);
+    assert(p.b->arq->peer_unavailable==1 && !p.b->arq->missing);
+    assert(p.b->arq_expired_remote==1 && !p.b->arq_expired_ttl);
+    assert(delivered_count==1 && delivered_bytes[0]=='B' && !p.b->arq->buffered);
+    assert(!p.b->arq->received_through); /* abandonment is never receipt */
+    assert(flush(p.b,XT_QUEUE) && !p.b->arq_nacks && !p.b->arq->nack_queued);
+    assert(arq_store_packet(p.b,1,"A",1)==0 && delivered_count==1);
+    arq_expire_remote(p.b,0); arq_expire_remote(p.b,3);
+    assert(p.b->arq->peer_unavailable==1 && p.b->arq_expired_remote==1);
+    /* A live prefix entry prevents a later missing/cleared slot being declared lost. */
+    assert(arq_unavailable(p.a)==1);
+    p.a->arq->tx[2].born=p.a->now-ARQ_CACHE_TTL;
+    assert(arq_unavailable(p.a)==2);
+    /* Lost final notices are repeated after the last original's cache TTL. */
+    p.a->now=p.a->arq->last_data+ARQ_CACHE_TTL+1; p.ab.drop=1;
+    arq_tick(p.a); assert(p.a->count && flush(p.a,XT_QUEUE)); control(p.b);
+    assert(p.b->arq->peer_unavailable==1);
+    p.a->now+=ARQ_MARK_INTERVAL;
+    arq_tick(p.a); assert(p.a->count && flush(p.a,XT_QUEUE)); control(p.b);
+    assert(p.b->arq->peer_unavailable==2 && !p.b->arq->received_through);
+    /* Validate all state fields and embedded feedback before mutating state. */
+    unsigned char bad[XT_HEADER+12]={1,ARQ_MARK_STATE,0,0}; put32(bad+4,12);
+    put32(bad+8,2); put32(bad+16,3);
+    assert(xdtls_write(p.a->dtls,bad,sizeof(bad))==(int)sizeof(bad)); control(p.b);
+    assert(p.b->drop_frame==1 && p.b->arq->peer_unavailable==2);
+    finish(&p);
+    init(&p); delivered_count=0; p.b->dev=(XtDevice *)p.b;
+    p.a->arq->sent=p.a->arq->next=65537;
+    p.a->arq->tx[1]=(ArqTx){.seq=65537,.born=p.a->now,.len=8};
+    p.a->arq->unavailable=65534;
+    p.b->arq->high=p.b->arq->delivered=p.b->arq->received_through=65534;
+    assert(arq_store_packet(p.b,1,"D",1)==1 && p.b->arq->missing==2);
+    p.a->arq->last_data=p.a->now; p.a->now+=200; p.b->now=p.a->now;
+    arq_tick(p.a); assert(flush(p.a,XT_QUEUE)); control(p.b);
+    assert(p.b->arq->peer_unavailable==65536 && !p.b->arq->missing && delivered_count==1);
+    assert(p.b->arq->received_through==65534);
+    arq_expire_remote(p.b,1); assert(p.b->arq->peer_unavailable==65536);
+    /* Ring overwrite advances only through entries that can no longer be cached. */
+    memset(p.a->arq,0,sizeof(*p.a->arq));
+    p.a->arq->sent=ARQ_WINDOW+3;
+    p.a->arq->tx[4]=(ArqTx){.seq=4,.born=p.a->now,.len=8};
+    assert(arq_unavailable(p.a)==3);
+    /* Full logical rollover must reset the session, never alias old IDs. */
+    p.a->arq->next=UINT32_MAX;
+    assert(!enqueue(p.a,DATA,"X",1) && p.a->arq->next==UINT32_MAX && p.a->records==(1u<<24));
+    p.b->arq->high=UINT32_MAX-1; uint32_t logical;
+    assert(arq_advance(p.b,65535,&logical,1)==-1);
+    finish(&p);
+    puts("PASS unavailable cache prefix MARK, prompt release, no false ACK, repeat/stale validation, wire rollover and logical reset");
+}
 int main(void) {
+    unavailable_mark_test();
     mark_feedback_test();
     packed_nack_test();
     cumulative_ack_test();

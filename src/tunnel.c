@@ -11,12 +11,12 @@
 #define XT_READ_BUDGET 32
 /* Linux clamps SO_RCVBUF/SO_SNDBUF to 2x rmem_max and ignores the rest. */
 #define XT_UDP_BUFFER (4*1024*1024)
-enum { READY = 1, DATA, PING, PONG, CLOSE, ARQ_DATA, ARQ_NACK, ARQ_MARK, ARQ_NACK_PACKED };
+enum { READY = 1, DATA, PING, PONG, CLOSE, ARQ_DATA, ARQ_NACK, ARQ_MARK, ARQ_NACK_PACKED, ARQ_MARK_STATE };
 #define ARQ_WINDOW 8192u
 _Static_assert(ARQ_WINDOW < 32768u && (65536u % ARQ_WINDOW) == 0,
                "ARQ ring must divide the wire sequence space and stay below half range");
 #define ARQ_CACHE_TTL 5000u
-#define ARQ_ORDER_WAIT 200u /* release later packets without abandoning repair */
+#define ARQ_ORDER_WAIT 3000u /* release later packets without abandoning repair */
 #define ARQ_REORDER 5u
 #define ARQ_FEEDBACK_GAP 5u
 #define ARQ_INITIAL 20u
@@ -46,6 +46,7 @@ typedef struct {
     uint32_t next, sent, high;
     uint32_t delivered;
     uint32_t received_through, peer_received; /* strict receipt ACK, never TTL skips */
+    uint32_t unavailable, peer_unavailable;
     unsigned buffered;
     uint64_t last_data, last_rx_data, last_mark, nack_due, last_feedback;
     unsigned missing, cursor;
@@ -103,7 +104,7 @@ typedef struct {
     uint64_t arq_order_waits, arq_order_skips;
     uint64_t arq_cache_overwritten, arq_cache_report_at;
     uint64_t arq_expired, arq_cache_miss, arq_limited;
-    uint64_t arq_expired_ttl, arq_expired_window, arq_cache_absent, arq_cache_ttl;
+    uint64_t arq_expired_ttl, arq_expired_window, arq_expired_remote, arq_cache_absent, arq_cache_ttl;
     uint64_t arq_deferred, arq_deferred_queued, arq_deferred_expired, arq_defer_wait_max;
     uint64_t arq_defer_wait_sum, arq_defer_wait_bins[6];
     uint64_t arq_cooldown_skip, arq_queue_skip, arq_retry_skip;
@@ -231,6 +232,9 @@ static int enqueue(Tunnel *t, unsigned type, const void *data, size_t n) {
     /* Reserve four slots for control. All buffers have fixed byte bounds. */
     if (n > (type == ARQ_DATA ? XT_MTU_MAX+2 : XT_MTU_MAX) || (type == DATA && n > t->cfg->mtu) ||
         t->count >= (is_data ? XT_QUEUE-4 : XT_QUEUE)) { ++t->drops; ++t->drop_tx_queue; return 0; }
+    /* Real sessions renew after 2^24 records; also guard synthetic/long-lived
+     * callers so full logical IDs never wrap inside one authenticated session. */
+    if (original && t->arq->next>=UINT32_MAX-1) { t->records=1u<<24; return 0; }
     unsigned tail = (t->head + t->count) % XT_QUEUE;
     unsigned char *p = t->queue[tail].bytes;
     p[0] = 1; p[1] = (unsigned char)(original ? ARQ_DATA : type); p[2] = p[3] = 0;
@@ -359,6 +363,26 @@ static void arq_prioritize_repair(Tunnel *t) {
         return;
     }
 }
+/* Only a contiguous unavailable prefix can be advertised. A live cache
+ * entry stops advancement even if later entries have already been cleared. */
+static uint32_t arq_unavailable(Tunnel *t) {
+    Arq *a=t->arq;
+    uint32_t cutoff=a->unavailable;
+    if (a->sent>ARQ_WINDOW && cutoff<a->sent-ARQ_WINDOW) cutoff=a->sent-ARQ_WINDOW;
+    while (cutoff<a->sent) {
+        uint32_t next=cutoff+1; ArqTx *c=&a->tx[next%ARQ_WINDOW];
+        if (c->seq==next && c->len && t->now-c->born<ARQ_CACHE_TTL) break;
+        cutoff=next;
+    }
+    return a->unavailable=cutoff;
+}
+static int arq_mark_active(Tunnel *t) {
+    Arq *a=t->arq;
+    /* Repeat the final expiry boundary after the last original has expired,
+     * including idle sessions and lost final MARKs. */
+    return (a->sent && t->now-a->last_data<2*ARQ_CACHE_TTL) ||
+           (a->high && t->now-a->last_rx_data<ARQ_CACHE_TTL);
+}
 static int flush(Tunnel *t, unsigned budget) {
     for (unsigned i = 0; i < budget && t->count; ++i) {
         arq_prioritize_repair(t);
@@ -374,12 +398,13 @@ static int flush(Tunnel *t, unsigned budget) {
             }
             put32(p+4, count); n = t->queue[head].len = XT_HEADER+count;
         }
-        if (p[1] == ARQ_MARK && !xdtls_write_pending(t->dtls)) {
-            if (t->now-t->arq->last_data >= ARQ_CACHE_TTL && t->now-t->arq->last_rx_data >= ARQ_CACHE_TTL) { t->arq->mark_queued=0; arq_pop(t); continue; }
-            put16(p+XT_HEADER, (uint16_t)t->arq->sent);
-            put32(p+XT_HEADER+2, t->arq->received_through);
-            unsigned feedback=arq_feedback(t,p+XT_HEADER+6);
-            put32(p+4,6+feedback); n=t->queue[head].len=XT_HEADER+6+feedback;
+        if (p[1] == ARQ_MARK_STATE && !xdtls_write_pending(t->dtls)) {
+            if (!arq_mark_active(t)) { t->arq->mark_queued=0; arq_pop(t); continue; }
+            put32(p+XT_HEADER,t->arq->sent);
+            put32(p+XT_HEADER+4,t->arq->received_through);
+            put32(p+XT_HEADER+8,arq_unavailable(t));
+            unsigned feedback=arq_feedback(t,p+XT_HEADER+12);
+            put32(p+4,12+feedback); n=t->queue[head].len=XT_HEADER+12+feedback;
         }
         if (t->queue[head].retry && (t->now >= t->queue[head].expires ||
             (t->arq->tx[be16(p+XT_HEADER)%ARQ_WINDOW].seq &&
@@ -419,9 +444,9 @@ static int flush(Tunnel *t, unsigned budget) {
             t->arq->nack_queued=0;
             arq_feedback_sent(t,p+XT_HEADER,n-XT_HEADER);
         }
-        if (p[1] == ARQ_MARK) {
-            if (n>XT_HEADER+6) arq_feedback_sent(t,p+XT_HEADER+6,n-XT_HEADER-6);
-            arq_log(t,"mark_sent","seq=%u received_through=%u",be16(p+XT_HEADER),be32(p+XT_HEADER+2));
+        if (p[1] == ARQ_MARK_STATE) {
+            if (n>XT_HEADER+12) arq_feedback_sent(t,p+XT_HEADER+12,n-XT_HEADER-12);
+            arq_log(t,"mark_sent","seq=%u received_through=%u unavailable_through=%u",be32(p+XT_HEADER),be32(p+XT_HEADER+4),be32(p+XT_HEADER+8));
             t->arq->mark_queued=0; t->arq->last_mark=t->now;
         }
         if (p[1] == PING && t->arq) {
@@ -451,7 +476,7 @@ static void arq_drain(Tunnel *t, uint32_t through) {
                 a->schedule_dirty = 1;
             }
             ++t->arq_order_skips;
-            arq_log(t,"order_skip","seq=%u reason=%s",(uint16_t)seq,forced ? "window" : r->expired ? "ttl" : "order_timeout");
+            arq_log(t,"order_skip","seq=%u reason=%s",(uint16_t)seq,forced ? "window" : seq<=a->peer_unavailable ? "remote" : r->expired ? "ttl" : "order_timeout");
         } else if (r->len) {
             if (xt_device_write(t->dev, r->bytes, r->len) <= 0) {
                 if (!forced && t->now-r->born < ARQ_CACHE_TTL) break;
@@ -462,13 +487,28 @@ static void arq_drain(Tunnel *t, uint32_t through) {
         a->delivered = seq;
     }
 }
+static void arq_expire_remote(Tunnel *t, uint32_t cutoff) {
+    Arq *a=t->arq;
+    if (cutoff<=a->peer_unavailable || cutoff>a->high) return;
+    a->peer_unavailable=cutoff;
+    unsigned count=0;
+    for (unsigned i=0; i<ARQ_WINDOW; ++i) {
+        ArqRx *r=&a->rx[i];
+        if (!r->seq || r->seq>cutoff || r->received || r->expired) continue;
+        r->expired=1; --a->missing; ++t->arq_expired; ++t->arq_expired_remote; ++count;
+    }
+    a->schedule_dirty=1;
+    arq_log(t,"remote_expired","unavailable_through=%u count=%u",cutoff,count);
+    arq_drain(t,0);
+    arq_timer_update(t);
+}
 static int arq_advance(Tunnel *t, uint16_t wire, uint32_t *logical, int watermark) {
     Arq *a = t->arq;
     unsigned delta = (uint16_t)(wire-(uint16_t)a->high);
     if (delta && delta < 32768) {
         /* Beyond the bounded window we cannot repair/interpret a blackout
          * safely. A new DTLS session resets both directions and rejects old data. */
-        if (delta >= ARQ_WINDOW) return -1;
+        if (delta >= ARQ_WINDOW || a->high>=UINT32_MAX-delta) return -1;
         uint32_t seq = a->high+delta, previous=a->high;
         if (seq >= ARQ_WINDOW) arq_drain(t, seq-ARQ_WINDOW);
         unsigned evicted=0;
@@ -654,11 +694,10 @@ static void arq_tick(Tunnel *t) {
     arq_drain(t, 0);
     arq_retry_deferred(t);
     if ((a->sent || a->high) && !a->mark_queued &&
-        (t->now-a->last_data < ARQ_CACHE_TTL || t->now-a->last_rx_data < ARQ_CACHE_TTL) &&
+        arq_mark_active(t) &&
         t->now-a->last_mark >= ARQ_MARK_INTERVAL && t->count < XT_QUEUE-2) {
-        unsigned char mark[6]; put16(mark, (uint16_t)a->sent);
-        put32(mark+2, a->received_through);
-        if (enqueue(t, ARQ_MARK, mark, sizeof(mark))) a->mark_queued=1;
+        unsigned char mark[12]={0};
+        if (enqueue(t, ARQ_MARK_STATE, mark, sizeof(mark))) a->mark_queued=1;
     }
     if (!a->missing) { arq_timer_cancel(t,"no_gaps"); return; }
     if (!a->timer || a->schedule_dirty || t->now>=a->nack_due) arq_timer_update(t);
@@ -757,6 +796,28 @@ static int receive_messages(Tunnel *t) {
             t->last_rx = t->now;
             arq_log_batch(t,"nack_received",ids,count);
             for (unsigned j=0; j<count; ++j) { ++t->arq_requests; arq_request(t,ids[j]); }
+        } else if (p[1]==ARQ_MARK_STATE && t->active && t->arq && n>=12 && n<=12+ARQ_NACK_BYTES) {
+            uint32_t sent=be32(p+8), ack=be32(p+12), cutoff=be32(p+16);
+            uint16_t ids[ARQ_WINDOW]; unsigned count=0;
+            if (n>12) count=arq_nack_decode(ARQ_NACK_PACKED,p+20,n-12,ids);
+            if ((n>12 && !count) || cutoff>sent || ack>t->arq->sent) {
+                ++t->drops; ++t->drop_frame; continue;
+            }
+            if (sent>t->arq->high) {
+                uint32_t logical;
+                if (sent-t->arq->high>=ARQ_WINDOW || arq_advance(t,(uint16_t)sent,&logical,1)<0) {
+                    arq_log(t,"resync","trigger=state_mark sent=%u high=%u",sent,t->arq->high);
+                    return 0;
+                }
+            }
+            t->last_rx=t->now;
+            arq_ack(t,ack);
+            arq_expire_remote(t,cutoff);
+            if (count) {
+                arq_log_batch(t,"nack_received",ids,count);
+                for (unsigned j=0; j<count; ++j) { ++t->arq_requests; arq_request(t,ids[j]); }
+            }
+            arq_log(t,"mark_received","seq=%u high=%u unavailable_through=%u",sent,t->arq->high,cutoff);
         } else if (p[1] == ARQ_MARK && t->active && t->arq && (n == 2 || (n >= 6 && n <= 6+ARQ_NACK_BYTES))) {
             uint16_t ids[ARQ_WINDOW]; unsigned count=0;
             /* Validate the optional NACK before applying even the cumulative ACK. */
@@ -828,13 +889,13 @@ static void print_arq_stats(Tunnel *t) {
     printf(" defer_wait_sum_ms=%llu defer_wait_0_10_ms=%llu defer_wait_11_50_ms=%llu "
            "defer_wait_51_100_ms=%llu defer_wait_101_250_ms=%llu "
            "defer_wait_251_500_ms=%llu defer_wait_gt500_ms=%llu "
-           "order_buffered=%u order_waits=%llu order_skips=%llu order_wait_ms=%u cache_ttl_ms=%u\n",
+           "order_buffered=%u order_waits=%llu order_skips=%llu order_wait_ms=%u cache_ttl_ms=%u expired_remote=%llu\n",
            (unsigned long long)t->arq_defer_wait_sum,
            (unsigned long long)t->arq_defer_wait_bins[0],(unsigned long long)t->arq_defer_wait_bins[1],
            (unsigned long long)t->arq_defer_wait_bins[2],(unsigned long long)t->arq_defer_wait_bins[3],
            (unsigned long long)t->arq_defer_wait_bins[4],(unsigned long long)t->arq_defer_wait_bins[5],
            t->arq ? t->arq->buffered : 0,
-           (unsigned long long)t->arq_order_waits,(unsigned long long)t->arq_order_skips,ARQ_ORDER_WAIT,ARQ_CACHE_TTL);
+           (unsigned long long)t->arq_order_waits,(unsigned long long)t->arq_order_skips,ARQ_ORDER_WAIT,ARQ_CACHE_TTL,(unsigned long long)t->arq_expired_remote);
 }
 static void print_live_stats(Tunnel *t, uint64_t start) {
     xUdpStats udp = {0};
