@@ -98,7 +98,6 @@ static void init(Pair *p) {
     p->a->now=p->b->now=10000; p->a->active=p->b->active=1;
     p->a->arq=calloc(1,sizeof(Arq)); p->b->arq=calloc(1,sizeof(Arq));
     assert(p->a->arq && p->b->arq);
-    p->a->arq->credit=p->b->arq->credit=4*XT_MTU_MAX;
 }
 static void finish(Pair *p) {
     xdtls_destroy(p->a->dtls); xdtls_destroy(p->b->dtls);
@@ -322,8 +321,7 @@ static void wrap_test(void) {
 }
 static void bounds_test(void) {
     Pair p; init(&p); send_data(p.a); assert(take_data(p.b,1)==1);
-    p.a->arq->credit=0; arq_request(p.a,1); assert(!p.a->count && p.a->arq_limited==1);
-    p.a->arq->credit=10000; arq_request(p.a,1); assert(p.a->count==1);
+    arq_request(p.a,1); assert(p.a->count==1 && !p.a->arq_limited);
     p.a->now+=ARQ_TTL; assert(flush(p.a,1));
     assert(!p.a->count && !p.a->arq_retransmits && !p.a->arq->tx[1].queued);
     arq_request(p.a,1); assert(!p.a->count && p.a->arq_cache_miss==1);
@@ -331,58 +329,30 @@ static void bounds_test(void) {
     assert(p.b->arq->missing==2);
     p.b->now+=ARQ_TTL; feedback(p.b);
     assert(!p.b->arq->missing && !p.b->arq->timer && !p.b->count);
-    finish(&p); puts("PASS byte budget, repair expiry, local delivery failure and timer expiry");
+    finish(&p); puts("PASS unbudgeted repair, repair expiry, local delivery failure and timer expiry");
 }
-static void burst_credit_test(void) {
+static void unbudgeted_burst_test(void) {
     Pair p; init(&p);
     unsigned char payload[XT_MTU]={0}, out[2048];
-    size_t initial=p.a->arq->credit;
     for (unsigned i=0;i<600;++i) {
         assert(enqueue(p.a,DATA,payload,sizeof(payload)) && flush(p.a,1));
         assert(xdtls_read(p.b->dtls,out,sizeof(out))==XT_HEADER+2+sizeof(payload));
-        assert(p.a->arq->credit==initial); /* sending originals alone mints no tokens */
     }
-    p.a->now+=1000; arq_budget_update(p.a);
-    assert(p.a->arq->credit==initial+ARQ_REPAIR_RATE_MIN);
-    assert(p.a->arq->repair_rate==600*(XT_HEADER+2+sizeof(payload))/4);
-    p.a->now+=1000; arq_budget_update(p.a);
-    assert(p.a->arq->credit==ARQ_CREDIT_MAX);
-    assert(p.a->arq->repair_rate==ARQ_REPAIR_RATE_MIN);
-    /* A quiet period earns enough credit for a burst larger than the old cap. */
-    for (unsigned seq=1;seq<=100;++seq) {
-        arq_request(p.a,(uint16_t)seq);
-        assert(p.a->count==1 && flush(p.a,1));
+    uint64_t now=p.a->now;
+    for (unsigned i=1;i<=600;++i) arq_request(p.a,(uint16_t)i);
+    assert(p.a->count==XT_QUEUE-4 && p.a->arq->pending==600-(XT_QUEUE-4));
+    unsigned received=0;
+    while (p.a->count || p.a->arq->pending) {
+        assert(flush(p.a,1));
         assert(xdtls_read(p.b->dtls,out,sizeof(out))==XT_HEADER+2+sizeof(payload));
+        ++received; arq_retry_deferred(p.a);
     }
-    assert(p.a->arq_retransmits==100 && !p.a->arq_limited && !p.a->arq->pending);
-    assert(p.a->arq->credit==ARQ_CREDIT_MAX-100*(XT_HEADER+2+sizeof(payload)));
-    arq_request(p.a,101); assert(p.a->count==1);
-    p.a->arq->credit=ARQ_CREDIT_MAX; p.a->now+=ARQ_TTL;
-    assert(flush(p.a,1) && p.a->arq->credit==ARQ_CREDIT_MAX);
-    assert(!p.a->count && p.a->arq_retransmits==100);
-    finish(&p); puts("PASS timed quarter-rate budget, idle recovery floor, bounded burst and expiry refund");
-}
-static void idle_budget_test(void) {
-    Pair p; init(&p);
-    unsigned char payload[XT_MTU]={0}, out[2048];
-    p.ab.drop=1;
-    assert(enqueue(p.a,DATA,payload,sizeof(payload)) && flush(p.a,1));
-    p.a->arq->credit=0;
-    arq_request(p.a,1);
-    assert(!p.a->count && p.a->arq->pending==1);
-    p.a->now+=57; arq_retry_deferred(p.a);
-    assert(!p.a->count && p.a->arq->pending==1);
-    ++p.a->now; arq_retry_deferred(p.a);
-    assert(p.a->count==1 && !p.a->arq->pending);
-    assert(p.a->arq_defer_wait_max==58 && flush(p.a,1));
+    assert(received==600 && p.a->arq_retransmits==600 && p.a->now==now && !p.a->arq_limited);
+    arq_request(p.a,1); assert(!p.a->count); /* cooldown still deduplicates */
+    p.a->now+=arq_cooldown(p.a->arq); arq_request(p.a,1);
+    assert(p.a->count==1 && flush(p.a,1));
     assert(xdtls_read(p.b->dtls,out,sizeof(out))==XT_HEADER+2+sizeof(payload));
-    /* Fractional accrual is independent of how frequently the loop ticks. */
-    p.a->arq->credit=0; p.a->arq->credit_fraction=0;
-    for(unsigned i=0;i<1000;++i) { ++p.a->now; arq_budget_update(p.a); }
-    assert(p.a->arq->credit==ARQ_REPAIR_RATE_MIN);
-    p.a->now+=1000000000; arq_budget_update(p.a);
-    assert(p.a->arq->credit==ARQ_CREDIT_MAX && !p.a->arq->credit_fraction);
-    finish(&p); puts("PASS exhausted repair budget recovers without originals, fractional refill and long-idle cap");
+    finish(&p); puts("PASS 600 full-size repairs without clock advance, queue backpressure and cooldown");
 }
 static void wait_stats_test(void) {
     Pair p; init(&p);
@@ -390,17 +360,17 @@ static void wait_stats_test(void) {
     uint64_t total=0;
     for (unsigned i=0;i<sizeof(waits)/sizeof(waits[0]);++i) {
         p.ab.drop=1; send_data(p.a);
-        p.a->arq->credit=0; arq_request(p.a,(uint16_t)(i+1));
-        assert(p.a->arq->pending==1 && !p.a->count);
+        p.a->count=XT_QUEUE-4; arq_request(p.a,(uint16_t)(i+1));
+        assert(p.a->arq->pending==1 && p.a->count==XT_QUEUE-4);
         p.a->now+=waits[i]; total+=waits[i];
-        p.a->arq->credit=ARQ_CREDIT_MAX; arq_retry_deferred(p.a);
+        p.a->count=0; arq_retry_deferred(p.a);
         assert(!p.a->arq->pending && p.a->count==1 && flush(p.a,1));
         assert(take_data(p.b,(uint16_t)(i+1))==1);
     }
     assert(p.a->arq_deferred_queued==12 && p.a->arq_defer_wait_max==900);
     assert(p.a->arq_defer_wait_sum==total);
     for (unsigned i=0;i<6;++i) assert(p.a->arq_defer_wait_bins[i]==2);
-    p.ab.drop=1; send_data(p.a); p.a->arq->credit=0; arq_request(p.a,13);
+    p.ab.drop=1; send_data(p.a); p.a->count=XT_QUEUE-4; arq_request(p.a,13);
     p.a->now+=ARQ_TTL; arq_retry_deferred(p.a);
     assert(!p.a->arq->pending && p.a->arq_deferred_expired==1);
     assert(p.a->arq_deferred_queued==12 && p.a->arq_defer_wait_sum==total);
@@ -575,10 +545,10 @@ static void cumulative_ack_test(void) {
     assert(flush(p.a,XT_QUEUE) && !p.a->arq_retransmits);
     arq_request(p.a,1); assert(!p.a->count);
     arq_ack(p.a,1); arq_ack(p.a,3); assert(p.a->arq->peer_received==2);
-    /* Pending budget-blocked requests are removed on cumulative ACK. */
-    send_data(p.a); p.a->arq->credit=0;
+    /* Pending queue-blocked requests are removed on cumulative ACK. */
+    send_data(p.a); p.a->count=XT_QUEUE-4;
     arq_request(p.a,3); assert(p.a->arq->pending==1);
-    arq_ack(p.a,3); assert(!p.a->arq->pending);
+    arq_ack(p.a,3); assert(!p.a->arq->pending); p.a->count=0;
     arq_request(p.a,3); assert(!p.a->count);
     /* Out-of-order receipt cannot acknowledge the missing packet. */
     assert(arq_receive(p.b,4,1)==1 && p.b->arq->received_through==2);
@@ -681,13 +651,55 @@ static void packed_nack_test(void) {
     finish(&p);
     puts("PASS packed NACK list/range/bitmap, rollover, malformed payloads, byte bounds and tail fairness");
 }
+static void mark_feedback_test(void) {
+    Pair p; init(&p);
+    p.ab.drop=4;
+    for (unsigned i=0; i<4; ++i) send_data(p.a);
+    assert(arq_receive(p.b,1,1)==1 && arq_receive(p.b,2,1)==1 && arq_receive(p.b,4,1)==1);
+    p.b->arq->last_rx_data=p.b->now;
+    p.b->now+=ARQ_MARK_INTERVAL; arq_tick(p.b);
+    assert(p.b->count==2); /* MARK first, independent NACK behind it */
+    arq_request(p.a,1); assert(p.a->count==1);
+    p.ba.block=1; assert(flush(p.b,XT_QUEUE));
+    assert(xdtls_write_pending(p.b->dtls));
+    unsigned char saved[XT_HEADER+6+ARQ_NACK_BYTES];
+    size_t n=p.b->queue[p.b->head].len;
+    assert(p.b->queue[p.b->head].bytes[1]==ARQ_MARK && n>XT_HEADER+6);
+    memcpy(saved,p.b->queue[p.b->head].bytes,n);
+    /* A gap filling during WANT_WRITE cannot mutate the queued MARK. */
+    assert(arq_receive(p.b,3,1)==1);
+    unsigned head=p.b->head;
+    assert(flush(p.b,XT_QUEUE));
+    assert(!memcmp(saved,p.b->queue[head].bytes,n));
+    assert(!p.b->count && p.b->arq_nacks==1 && !p.b->arq->nack_queued);
+    control(p.a);
+    assert(p.a->arq->peer_received==2 && p.a->arq_requests==1);
+    assert(flush(p.a,XT_QUEUE) && p.a->arq_retransmits==1); /* only gap 3 */
+    /* An invalid embedded request cannot partially apply its ACK. */
+    unsigned char bad[XT_HEADER+12]={1,ARQ_MARK,0,0};
+    put32(bad+4,12); put32(bad+10,4);
+    bad[14]=ARQ_BITMAP; put16(bad+15,3); put16(bad+17,1); bad[19]=0x81;
+    assert(xdtls_write(p.b->dtls,bad,sizeof(bad))==(int)sizeof(bad)); control(p.a);
+    assert(p.a->drop_frame==1 && p.a->arq->peer_received==2 && p.a->arq_requests==1);
+    finish(&p);
+    /* With no write stall, MARK advances backoff and cancels redundant NACK. */
+    init(&p); assert(arq_receive(p.b,2,1)==1);
+    p.b->arq->last_rx_data=p.b->now; p.b->now+=ARQ_MARK_INTERVAL;
+    arq_tick(p.b); assert(p.b->count==2);
+    assert(flush(p.b,XT_QUEUE)); control(p.a);
+    assert(p.b->arq_nacks==1 && p.a->arq_requests==1);
+    assert(p.b->arq->rx[1].requested && p.b->arq->rx[1].feedback_due==p.b->now+ARQ_INITIAL);
+    finish(&p);
+    puts("PASS MARK piggyback ACK/NACK, shared backoff, duplicate cancellation, immutable retries and atomic validation");
+}
 int main(void) {
+    mark_feedback_test();
     packed_nack_test();
     cumulative_ack_test();
     ordered_delivery_test();
     encrypted_order_test();
     independent_batch_test(); long_recovery_test();
     timer_test(); recovery_test(); priority_test(); reorder_test(); watermark_test(); wrap_test(); bounds_test(); queued_test(); batch_test();
-    burst_credit_test(); idle_budget_test(); wait_stats_test(); logging_test(); ping_sampling_test(); feedback_rtt_test();
+    unbudgeted_burst_test(); wait_stats_test(); logging_test(); ping_sampling_test(); feedback_rtt_test();
     puts("ALL ARQ TESTS PASSED"); return 0;
 }
