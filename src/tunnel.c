@@ -44,6 +44,7 @@ typedef struct {
 typedef struct {
     uint32_t next, sent, high;
     uint32_t delivered;
+    uint32_t received_through, peer_received; /* strict receipt ACK, never TTL skips */
     unsigned buffered;
     uint64_t last_data, last_rx_data, last_mark, nack_due, last_feedback;
     unsigned missing, cursor;
@@ -331,15 +332,19 @@ static int flush(Tunnel *t, unsigned budget) {
             put32(p+4, count*2); n = t->queue[head].len = XT_HEADER+count*2;
         }
         if (p[1] == ARQ_MARK && !xdtls_write_pending(t->dtls)) {
-            if (t->now-t->arq->last_data >= ARQ_TTL) { t->arq->mark_queued=0; arq_pop(t); continue; }
+            if (t->now-t->arq->last_data >= ARQ_TTL && t->now-t->arq->last_rx_data >= ARQ_TTL) { t->arq->mark_queued=0; arq_pop(t); continue; }
             put16(p+XT_HEADER, (uint16_t)t->arq->sent);
+            put32(p+XT_HEADER+2, t->arq->received_through);
         }
-        if (t->queue[head].retry && t->now >= t->queue[head].expires && !xdtls_write_pending(t->dtls)) {
+        if (t->queue[head].retry && (t->now >= t->queue[head].expires ||
+            (t->arq->tx[be16(p+XT_HEADER)%ARQ_WINDOW].seq &&
+             t->arq->tx[be16(p+XT_HEADER)%ARQ_WINDOW].seq <= t->arq->peer_received)) && !xdtls_write_pending(t->dtls)) {
             uint16_t seq = be16(p+XT_HEADER);
             ArqTx *cached = &t->arq->tx[seq % ARQ_WINDOW];
             if ((uint16_t)cached->seq == seq) cached->queued = 0;
-            arq_log(t,"repair_drop","seq=%u reason=expired late_ms=%llu",seq,
-                    (unsigned long long)(t->now-t->queue[head].expires));
+            arq_log(t,"repair_drop","seq=%u reason=%s late_ms=%llu",seq,
+                    t->now >= t->queue[head].expires ? "expired" : "acked",
+                    (unsigned long long)(t->now >= t->queue[head].expires ? t->now-t->queue[head].expires : 0));
             t->arq->credit += n;
             if (t->arq->credit > ARQ_CREDIT_MAX) t->arq->credit = ARQ_CREDIT_MAX;
             arq_pop(t); continue;
@@ -384,7 +389,7 @@ static int flush(Tunnel *t, unsigned budget) {
             arq_timer_update(t);
         }
         if (p[1] == ARQ_MARK) {
-            arq_log(t,"mark_sent","seq=%u",be16(p+XT_HEADER));
+            arq_log(t,"mark_sent","seq=%u received_through=%u",be16(p+XT_HEADER),be32(p+XT_HEADER+2));
             t->arq->mark_queued=0; t->arq->last_mark=t->now;
         }
         if (p[1] == PING && t->arq) {
@@ -465,6 +470,12 @@ static int arq_receive(Tunnel *t, uint16_t wire, int delivered) {
     if (delivered) {
         if (r->requested) ++t->arq_recovered; /* gap filled, possibly by a late original */
         r->received = 1;
+        while (t->arq->received_through < t->arq->high) {
+            uint32_t next=t->arq->received_through+1;
+            ArqRx *contiguous=&t->arq->rx[next%ARQ_WINDOW];
+            if (contiguous->seq!=next || !contiguous->received) break;
+            t->arq->received_through=next;
+        }
         if (!r->expired) --t->arq->missing;
         t->arq->schedule_dirty=1;
         if (r->gap || r->requested) arq_log(t,"gap_filled","seq=%u logical_seq=%u requested=%d age_ms=%llu missing=%u",
@@ -522,7 +533,22 @@ static void arq_try_repair(Tunnel *t, ArqTx *c, int from_nack) {
     c->queued = 1; t->arq->credit -= cost;
     arq_log(t,"repair_queued","seq=%u retry=%u bytes=%zu wait_ms=%llu",seq,c->retries+1,cost,(unsigned long long)wait);
 }
+static void arq_ack(Tunnel *t, uint32_t ack) {
+    Arq *a=t->arq;
+    if (ack<=a->peer_received || ack>a->sent) return;
+    a->peer_received=ack;
+    for (unsigned i=0; i<ARQ_WINDOW; ++i) {
+        ArqTx *c=&a->tx[i];
+        if (!c->seq || c->seq>ack) continue;
+        arq_defer_clear(t,c,NULL);
+        /* Keep sequence identity until queued/in-flight writes finish. */
+        c->len=0;
+    }
+    arq_log(t,"ack_received","received_through=%u",ack);
+}
 static void arq_request(Tunnel *t, uint16_t seq) {
+    unsigned back=(uint16_t)((uint16_t)t->arq->sent-seq);
+    if (back<32768 && t->arq->sent>=back && t->arq->sent-back<=t->arq->peer_received) return;
     ArqTx *c=&t->arq->tx[seq%ARQ_WINDOW];
     if (!c->seq || (uint16_t)c->seq!=seq || t->now-c->born>=ARQ_TTL) {
         int absent=!c->seq || (uint16_t)c->seq!=seq;
@@ -584,9 +610,11 @@ static void arq_tick(Tunnel *t) {
     arq_budget_update(t);
     arq_drain(t, 0);
     arq_retry_deferred(t);
-    if (a->sent && !a->mark_queued && t->now-a->last_data < ARQ_TTL &&
+    if ((a->sent || a->high) && !a->mark_queued &&
+        (t->now-a->last_data < ARQ_TTL || t->now-a->last_rx_data < ARQ_TTL) &&
         t->now-a->last_mark >= ARQ_MARK_INTERVAL && t->count < XT_QUEUE-2) {
-        unsigned char mark[2]; put16(mark, (uint16_t)a->sent);
+        unsigned char mark[6]; put16(mark, (uint16_t)a->sent);
+        put32(mark+2, a->received_through);
         if (enqueue(t, ARQ_MARK, mark, sizeof(mark))) a->mark_queued=1;
     }
     if (!a->missing) { arq_timer_cancel(t,"no_gaps"); return; }
@@ -684,7 +712,9 @@ static int receive_messages(Tunnel *t) {
             t->last_rx = t->now;
             arq_log_batch(t,"nack_received",p+8,(unsigned)(n/2));
             for (size_t j = 0; j < n; j += 2) { ++t->arq_requests; arq_request(t, be16(p+8+j)); }
-        } else if (p[1] == ARQ_MARK && t->active && t->arq && n == 2) {
+        } else if (p[1] == ARQ_MARK && t->active && t->arq && (n == 2 || n == 6)) {
+            if (n == 6) arq_ack(t,be32(p+10));
+            if (!be16(p+8) && !t->arq->high) { t->last_rx=t->now; continue; }
             uint32_t seq;
             t->last_rx = t->now;
             arq_log(t,"mark_received","seq=%u high=%u",be16(p+8),(uint16_t)t->arq->high);

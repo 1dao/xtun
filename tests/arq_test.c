@@ -560,7 +560,46 @@ static void ping_sampling_test(void) {
     a->active=0; a->now+=20000; ping_tick(a); assert(!a->count);
     finish(&p); puts("PASS immediate RTT probe, 1s bidirectional activity sampling and 20s idle keepalive");
 }
+static void cumulative_ack_test(void) {
+    Pair p; init(&p);
+    send_data(p.a); assert(take_data(p.b,1)==1);
+    send_data(p.a); assert(take_data(p.b,2)==1);
+    assert(p.b->arq->received_through==2);
+    /* A receive-only peer sends ACKs, with no outbound DATA of its own. */
+    p.b->arq->last_rx_data=p.b->now;
+    p.b->now+=ARQ_MARK_INTERVAL;
+    arq_request(p.a,1); assert(p.a->count==1);
+    arq_tick(p.b); assert(p.b->count==1);
+    assert(flush(p.b,XT_QUEUE)); control(p.a);
+    assert(p.a->arq->peer_received==2 && !p.a->arq->tx[1].len);
+    assert(flush(p.a,XT_QUEUE) && !p.a->arq_retransmits);
+    arq_request(p.a,1); assert(!p.a->count);
+    arq_ack(p.a,1); arq_ack(p.a,3); assert(p.a->arq->peer_received==2);
+    /* Pending budget-blocked requests are removed on cumulative ACK. */
+    send_data(p.a); p.a->arq->credit=0;
+    arq_request(p.a,3); assert(p.a->arq->pending==1);
+    arq_ack(p.a,3); assert(!p.a->arq->pending);
+    arq_request(p.a,3); assert(!p.a->count);
+    /* Out-of-order receipt cannot acknowledge the missing packet. */
+    assert(arq_receive(p.b,4,1)==1 && p.b->arq->received_through==2);
+    assert(arq_receive(p.b,3,1)==1 && p.b->arq->received_through==4);
+    p.b->dev=(XtDevice *)p.b;
+    assert(arq_receive(p.b,6,1)==1);
+    p.b->now+=ARQ_TTL; arq_drain(p.b,0);
+    assert(p.b->arq->received_through==4); /* TTL skip is not receipt */
+    /* Full logical ACKs do not alias on 16-bit wire sequence rollover. */
+    memset(p.b->arq,0,sizeof(*p.b->arq));
+    p.b->arq->high=p.b->arq->delivered=p.b->arq->received_through=65534;
+    assert(arq_receive(p.b,0,1)==1 && p.b->arq->received_through==65534);
+    assert(arq_receive(p.b,65535,1)==1 && p.b->arq->received_through==65536);
+    p.a->arq->sent=65537; p.a->arq->peer_received=65536;
+    arq_request(p.a,0); assert(!p.a->count);
+    arq_ack(p.a,1); assert(p.a->arq->peer_received==65536);
+    finish(&p);
+    puts("PASS cumulative MARK ACK, receive-only feedback, queued/pending cancellation, stale NACK and rollover");
+}
 int main(void) {
+    cumulative_ack_test();
     ordered_delivery_test();
     encrypted_order_test();
     independent_batch_test(); long_recovery_test();
