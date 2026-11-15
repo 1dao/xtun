@@ -11,7 +11,7 @@
 #define XT_READ_BUDGET 32
 /* Linux clamps SO_RCVBUF/SO_SNDBUF to 2x rmem_max and ignores the rest. */
 #define XT_UDP_BUFFER (4*1024*1024)
-enum { READY = 1, DATA, PING, PONG, CLOSE, ARQ_DATA, ARQ_NACK, ARQ_MARK };
+enum { READY = 1, DATA, PING, PONG, CLOSE, ARQ_DATA, ARQ_NACK, ARQ_MARK, ARQ_NACK_PACKED };
 #define ARQ_WINDOW 8192u
 _Static_assert(ARQ_WINDOW < 32768u && (65536u % ARQ_WINDOW) == 0,
                "ARQ ring must divide the wire sequence space and stay below half range");
@@ -25,7 +25,9 @@ _Static_assert(ARQ_WINDOW < 32768u && (65536u % ARQ_WINDOW) == 0,
 #define ARQ_CREDIT_MAX (128u*XT_MTU_MAX)
 #define ARQ_REPAIR_RATE_MIN (16u*XT_MTU_MAX) /* bytes/s: recovery continues when originals stop */
 #define ARQ_MARK_INTERVAL 200u
-#define ARQ_BATCH 512u /* 1024-byte feedback payload fits even the minimum MTU */
+#define ARQ_BATCH 512u /* legacy ID-list limit */
+#define ARQ_NACK_BYTES 1024u /* bounded below the minimum inner MTU */
+enum { ARQ_IDS, ARQ_RANGE, ARQ_BITMAP };
 typedef struct {
     uint32_t seq;
     uint64_t born, feedback_due;
@@ -121,13 +123,13 @@ static void arq_log(Tunnel *t, const char *event, const char *format, ...) {
     va_list args; va_start(args, format); vprintf(format, args); va_end(args);
     putchar('\n'); fflush(stdout);
 }
-static void arq_log_batch(Tunnel *t, const char *event, const unsigned char *seqs, unsigned count) {
+static void arq_log_batch(Tunnel *t, const char *event, const uint16_t *seqs, unsigned count) {
     if (!t->cfg->arq_log) return;
     char list[16*6+1]; size_t used=0;
     unsigned shown=count<16 ? count : 16;
     list[0]=0;
     for (unsigned i=0; i<shown; ++i)
-        used+=(size_t)snprintf(list+used, sizeof(list)-used, "%s%u", i ? "," : "", be16(seqs+2*i));
+        used+=(size_t)snprintf(list+used, sizeof(list)-used, "%s%u", i ? "," : "", seqs[i]);
     arq_log(t,event,"count=%u seqs=%s omitted=%u missing=%u", count,list,count-shown,t->arq->missing);
 }
 static void arq_timer_cancel(Tunnel *t, const char *reason) {
@@ -253,17 +255,78 @@ static void queue_ready(Tunnel *t) {
     p[14] = (unsigned char)(t->cfg->arq && t->peer_arq);
     if (enqueue(t, READY, p, sizeof(p))) t->last_ready = t->now;
 }
+/* Packed feedback: mode byte, then either 16-bit IDs, or start/count and
+ * optional bitmap. Bit i (LSB first) requests (start+i) modulo 65536.
+ * Zero bits never acknowledge receipt. Legacy NACKs remain decode-only. */
+static unsigned arq_nack_decode(unsigned type, const unsigned char *p, size_t n, uint16_t *ids) {
+    if (!n || n>ARQ_NACK_BYTES) return 0;
+    if (type==ARQ_NACK) {
+        if (n%2) return 0;
+        for (unsigned i=0; i<n/2; ++i) ids[i]=be16(p+2*i);
+        return (unsigned)n/2;
+    }
+    unsigned mode=*p++; --n;
+    if (mode==ARQ_IDS) {
+        if (!n || n%2) return 0;
+        for (unsigned i=0; i<n/2; ++i) ids[i]=be16(p+2*i);
+        return (unsigned)n/2;
+    }
+    if ((mode!=ARQ_RANGE && mode!=ARQ_BITMAP) || n<4) return 0;
+    uint16_t start=be16(p); unsigned span=be16(p+2), count=0;
+    if (!span || span>ARQ_WINDOW) return 0;
+    if (mode==ARQ_RANGE) {
+        if (n!=4) return 0;
+    } else {
+        if (n!=4+(span+7)/8) return 0;
+        if (span%8 && (p[n-1] >> (span%8))) return 0;
+    }
+    for (unsigned i=0; i<span; ++i)
+        if (mode==ARQ_RANGE || (p[4+i/8] & (1u<<(i%8)))) ids[count++]=(uint16_t)(start+i);
+    return count;
+}
+static unsigned arq_nack_encode(const uint16_t *ids, unsigned count, unsigned char *out) {
+    if (!count) return 0;
+    unsigned span=(uint16_t)(ids[count-1]-ids[0])+1u;
+    unsigned list=1+2*count, bitmap=5+(span+7)/8;
+    /* A full-window bitmap plus its header is slightly over the byte cap.
+     * Leave its tail for the next feedback; per-gap backoff prevents starvation. */
+    if (count!=span && list>ARQ_NACK_BYTES && bitmap>ARQ_NACK_BYTES) {
+        while ((uint16_t)(ids[count-1]-ids[0]) >= (ARQ_NACK_BYTES-5)*8) --count;
+        span=(uint16_t)(ids[count-1]-ids[0])+1u;
+        list=1+2*count; bitmap=5+(span+7)/8;
+    }
+    if (list<=5 || (count!=span && list<=bitmap)) {
+        out[0]=ARQ_IDS;
+        for (unsigned i=0; i<count; ++i) put16(out+1+2*i,ids[i]);
+        return list;
+    }
+    out[0]=(unsigned char)(count==span ? ARQ_RANGE : ARQ_BITMAP);
+    put16(out+1,ids[0]); put16(out+3,(uint16_t)span);
+    if (count==span) return 5;
+    memset(out+5,0,bitmap-5);
+    for (unsigned i=0; i<count; ++i) {
+        unsigned offset=(uint16_t)(ids[i]-ids[0]);
+        out[5+offset/8] |= (unsigned char)(1u<<(offset%8));
+    }
+    return bitmap;
+}
 static unsigned arq_feedback(Tunnel *t, unsigned char *out) {
-    Arq *a = t->arq; unsigned count = 0;
+    Arq *a=t->arq; unsigned count=0; uint32_t first=UINT32_MAX;
+    uint16_t ids[ARQ_WINDOW];
     arq_timer_update(t);
     if (!a->timer || t->now<a->nack_due) return 0;
-    for (unsigned j = 0; j < ARQ_WINDOW; ++j) {
-        ArqRx *r = &a->rx[(a->cursor+j)%ARQ_WINDOW];
-        if (!r->seq || r->received || r->expired || t->now<r->feedback_due) continue;
-        put16(out+2*count, (uint16_t)r->seq);
-        if (++count == ARQ_BATCH) break;
+    for (unsigned i=0; i<ARQ_WINDOW; ++i) {
+        ArqRx *r=&a->rx[i];
+        if (r->seq && !r->received && !r->expired && t->now>=r->feedback_due && r->seq<first) first=r->seq;
     }
-    return count;
+    if (first==UINT32_MAX) return 0;
+    /* Sort by full logical sequence, never by the wrapped wire ID. */
+    for (unsigned i=0; i<ARQ_WINDOW && first+i<=a->high; ++i) {
+        ArqRx *r=&a->rx[(first+i)%ARQ_WINDOW];
+        if (r->seq==first+i && !r->received && !r->expired && t->now>=r->feedback_due)
+            ids[count++]=(uint16_t)r->seq;
+    }
+    return arq_nack_encode(ids,count,out);
 }
 static void arq_pop(Tunnel *t) {
     t->head = (t->head+1)%XT_QUEUE; --t->count;
@@ -323,13 +386,13 @@ static int flush(Tunnel *t, unsigned budget) {
         unsigned char *p = t->queue[head].bytes;
         /* Refresh/cancel queued feedback only before a DTLS write starts.
          * WANT_WRITE requires an immutable retry of the exact same message. */
-        if (p[1] == ARQ_NACK && !xdtls_write_pending(t->dtls)) {
+        if (p[1] == ARQ_NACK_PACKED && !xdtls_write_pending(t->dtls)) {
             unsigned count = arq_feedback(t, p+XT_HEADER);
             if (!count) {
                 arq_log(t,"nack_cancel","reason=no_due_gaps");
                 t->arq->nack_queued=0; arq_pop(t); continue;
             }
-            put32(p+4, count*2); n = t->queue[head].len = XT_HEADER+count*2;
+            put32(p+4, count); n = t->queue[head].len = XT_HEADER+count;
         }
         if (p[1] == ARQ_MARK && !xdtls_write_pending(t->dtls)) {
             if (t->now-t->arq->last_data >= ARQ_TTL && t->now-t->arq->last_rx_data >= ARQ_TTL) { t->arq->mark_queued=0; arq_pop(t); continue; }
@@ -374,11 +437,14 @@ static int flush(Tunnel *t, unsigned budget) {
                 a->original_bytes += n;
             }
         }
-        if (p[1] == ARQ_NACK) {
+        if (p[1] == ARQ_NACK_PACKED) {
             Arq *a = t->arq; ++t->arq_nacks; a->nack_queued=0;
-            arq_log_batch(t,"nack_sent",p+XT_HEADER,(unsigned)((n-XT_HEADER)/2));
-            for (size_t j = XT_HEADER; j < n; j += 2) {
-                uint16_t seq = be16(p+j); ArqRx *r = &a->rx[seq%ARQ_WINDOW];
+            uint16_t ids[ARQ_WINDOW];
+            unsigned count=arq_nack_decode(p[1],p+XT_HEADER,n-XT_HEADER,ids);
+            arq_log_batch(t,"nack_sent",ids,count);
+            arq_log(t,"nack_encoding","mode=%u bytes=%zu count=%u",p[XT_HEADER],n-XT_HEADER,count);
+            for (unsigned j=0; j<count; ++j) {
+                uint16_t seq = ids[j]; ArqRx *r = &a->rx[seq%ARQ_WINDOW];
                 if (r->seq && (uint16_t)r->seq == seq && !r->received && !r->expired) {
                     r->requested=1; r->feedback_due=t->now+r->delay;
                     r->delay=arq_next_feedback_delay(r->delay);
@@ -627,7 +693,7 @@ static void arq_tick(Tunnel *t) {
     }
     if (a->nack_queued || t->now < a->nack_due || t->count >= XT_QUEUE-2) return;
     unsigned char placeholder[2] = {0};
-    if (enqueue(t, ARQ_NACK, placeholder, sizeof(placeholder))) {
+    if (enqueue(t, ARQ_NACK_PACKED, placeholder, sizeof(placeholder))) {
         a->nack_queued=1;
     }
 }
@@ -708,10 +774,13 @@ static int receive_messages(Tunnel *t) {
                     arq_log(t,"delivery_failed","seq=%u reason=tun_write",be16(p+8));
                 }
             }
-        } else if (p[1] == ARQ_NACK && t->active && t->arq && n && n <= 2*ARQ_BATCH && !(n%2)) {
+        } else if ((p[1] == ARQ_NACK || p[1] == ARQ_NACK_PACKED) && t->active && t->arq) {
+            uint16_t ids[ARQ_WINDOW];
+            unsigned count=arq_nack_decode(p[1],p+8,n,ids);
+            if (!count) { ++t->drops; ++t->drop_frame; continue; }
             t->last_rx = t->now;
-            arq_log_batch(t,"nack_received",p+8,(unsigned)(n/2));
-            for (size_t j = 0; j < n; j += 2) { ++t->arq_requests; arq_request(t, be16(p+8+j)); }
+            arq_log_batch(t,"nack_received",ids,count);
+            for (unsigned j=0; j<count; ++j) { ++t->arq_requests; arq_request(t,ids[j]); }
         } else if (p[1] == ARQ_MARK && t->active && t->arq && (n == 2 || n == 6)) {
             if (n == 6) arq_ack(t,be32(p+10));
             if (!be16(p+8) && !t->arq->high) { t->last_rx=t->now; continue; }

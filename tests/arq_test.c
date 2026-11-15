@@ -426,9 +426,9 @@ static void queued_test(void) {
 static void batch_test(void) {
     Pair p; init(&p);
     assert(arq_receive(p.b,600,1)==1 && p.b->arq->missing==599);
-    feedback(p.b); control(p.a); assert(p.a->arq_requests==ARQ_BATCH);
+    feedback(p.b); control(p.a); assert(p.a->arq_requests==599);
     p.b->now+=20; feedback(p.b); control(p.a);
-    assert(p.b->arq->rx[599].requested); /* later gaps are not starved by the first batch */
+    assert(p.b->arq->rx[599].requested); /* all 599 gaps fit in one range; retries remain per-gap */
     p.b->now+=ARQ_TTL; feedback(p.b); assert(!p.b->count && !p.b->arq->missing);
     unsigned char malformed[XT_HEADER+2*ARQ_BATCH+2]={1,ARQ_NACK,0,0};
     put32(malformed+4,1);
@@ -462,7 +462,7 @@ static void logging_test(void) {
     p.ab.drop=1; send_data(p.a); /* tail gap is exposed by the watermark */
     p.a->now+=200; feedback(p.a); control(p.b); feedback(p.b); control(p.a);
     p.b->now+=ARQ_TTL; feedback(p.b);
-    unsigned char seqs[40]; for (unsigned i=0;i<20;++i) put16(seqs+2*i,(uint16_t)i);
+    uint16_t seqs[20]; for (unsigned i=0;i<20;++i) seqs[i]=(uint16_t)i;
     arq_log_batch(p.b,"preview",seqs,20);
     reset(p.b);
     fflush(stdout); assert(dup2(saved,fileno(stdout))>=0); close(saved);
@@ -598,7 +598,91 @@ static void cumulative_ack_test(void) {
     finish(&p);
     puts("PASS cumulative MARK ACK, receive-only feedback, queued/pending cancellation, stale NACK and rollover");
 }
+static void packed_nack_test(void) {
+    uint16_t ids[ARQ_WINDOW], decoded[ARQ_WINDOW];
+    unsigned char encoded[ARQ_NACK_BYTES];
+    for (unsigned i=0; i<3000; ++i) ids[i]=(uint16_t)(65000+i);
+    unsigned n=arq_nack_encode(ids,3000,encoded);
+    assert(n==5 && encoded[0]==ARQ_RANGE && be16(encoded+1)==65000 && be16(encoded+3)==3000);
+    assert(arq_nack_decode(ARQ_NACK_PACKED,encoded,n,decoded)==3000);
+    assert(!memcmp(ids,decoded,3000*sizeof(*ids)));
+    for (unsigned i=0; i<100; ++i) ids[i]=(uint16_t)(65530+2*i);
+    n=arq_nack_encode(ids,100,encoded);
+    assert(n==30 && encoded[0]==ARQ_BITMAP && be16(encoded+3)==199);
+    assert(arq_nack_decode(ARQ_NACK_PACKED,encoded,n,decoded)==100);
+    assert(!memcmp(ids,decoded,100*sizeof(*ids)));
+    ids[0]=65534; ids[1]=0; ids[2]=3;
+    n=arq_nack_encode(ids,3,encoded);
+    assert(n==6 && encoded[0]==ARQ_BITMAP && encoded[5]==0x25);
+    assert(arq_nack_decode(ARQ_NACK_PACKED,encoded,n,decoded)==3 && !memcmp(ids,decoded,6));
+    ids[0]=100; ids[1]=8000;
+    n=arq_nack_encode(ids,2,encoded);
+    assert(n==5 && encoded[0]==ARQ_IDS);
+    assert(arq_nack_decode(ARQ_NACK_PACKED,encoded,n,decoded)==2 && !memcmp(ids,decoded,4));
+    for (unsigned i=0; i<ARQ_WINDOW; ++i) ids[i]=(uint16_t)(65530+i);
+    n=arq_nack_encode(ids,ARQ_WINDOW,encoded);
+    assert(n==5 && encoded[0]==ARQ_RANGE);
+    assert(arq_nack_decode(ARQ_NACK_PACKED,encoded,n,decoded)==ARQ_WINDOW);
+    assert(!memcmp(ids,decoded,sizeof(ids)));
+    /* Random dense/sparse sets, wire rollover and byte-cap truncation. */
+    unsigned rng=7;
+    for (unsigned round=0; round<200; ++round) {
+        unsigned count=0;
+        for (unsigned i=0; i<ARQ_WINDOW; ++i) {
+            rng=1664525u*rng+1013904223u;
+            if (rng%100 < (round%99)+1) ids[count++]=(uint16_t)(65000+i);
+        }
+        n=arq_nack_encode(ids,count,encoded);
+        assert(n && n<=ARQ_NACK_BYTES);
+        unsigned got=arq_nack_decode(ARQ_NACK_PACKED,encoded,n,decoded);
+        assert(got && got<=count && !memcmp(ids,decoded,got*sizeof(*ids)));
+    }
+    unsigned char bad[]={ARQ_BITMAP,0,1,0,1,0x80};
+    assert(!arq_nack_decode(ARQ_NACK_PACKED,bad,sizeof(bad),decoded)); /* padding bits */
+    bad[5]=0; assert(!arq_nack_decode(ARQ_NACK_PACKED,bad,sizeof(bad),decoded)); /* empty */
+    bad[5]=1; assert(!arq_nack_decode(ARQ_NACK_PACKED,bad,sizeof(bad)-1,decoded));
+    bad[3]=bad[4]=0; assert(!arq_nack_decode(ARQ_NACK_PACKED,bad,sizeof(bad),decoded));
+    bad[0]=99; assert(!arq_nack_decode(ARQ_NACK_PACKED,bad,sizeof(bad),decoded));
+    /* Real feedback starts at the earliest due logical gap across rollover. */
+    Pair p; init(&p);
+    p.b->arq->high=p.b->arq->received_through=p.b->arq->delivered=65533;
+    p.a->arq->sent=65540;
+    assert(arq_receive(p.b,4,1)==1);
+    p.b->now+=ARQ_REORDER; arq_tick(p.b);
+    p.ba.block=1; assert(flush(p.b,1));
+    unsigned char *wire=p.b->queue[p.b->head].bytes;
+    assert(wire[1]==ARQ_NACK_PACKED && wire[8]==ARQ_RANGE && be16(wire+9)==65534 && be16(wire+11)==6);
+    assert(flush(p.b,1)); control(p.a); assert(p.a->arq_requests==6);
+    finish(&p);
+    /* Validate the whole packed frame before issuing any repair requests. */
+    init(&p);
+    const unsigned char malformed[][6]={
+        {ARQ_BITMAP,0,1,0,1,0x81}, /* valid first bit but invalid padding */
+        {ARQ_RANGE,0,1,0,0,0},    /* zero span */
+        {ARQ_RANGE,0,1,0x20,1,0}, /* outside receive window */
+        {ARQ_IDS,0,1,0,0,0},      /* odd ID payload length */
+        {99,0,0,0,0,0}
+    };
+    for (unsigned i=0; i<sizeof(malformed)/sizeof(*malformed); ++i) {
+        unsigned char frame[XT_HEADER+6]={1,ARQ_NACK_PACKED,0,0};
+        put32(frame+4,6); memcpy(frame+XT_HEADER,malformed[i],6);
+        assert(xdtls_write(p.b->dtls,frame,sizeof(frame))==(int)sizeof(frame)); control(p.a);
+        assert(p.a->drop_frame==i+1 && !p.a->arq_requests && !p.a->count);
+    }
+    finish(&p);
+    /* A near-full sparse window spans two feedbacks without starving its tail. */
+    init(&p);
+    assert(arq_receive(p.b,8191,1)==1);
+    assert(arq_receive(p.b,2,1)==1);
+    feedback(p.b); control(p.a);
+    assert(p.a->arq_requests==8151 && !p.b->arq->rx[8190].requested);
+    p.b->now+=ARQ_FEEDBACK_GAP; feedback(p.b); control(p.a);
+    assert(p.b->arq->rx[8190].requested && p.a->arq_requests==8189);
+    finish(&p);
+    puts("PASS packed NACK list/range/bitmap, rollover, malformed payloads, byte bounds and tail fairness");
+}
 int main(void) {
+    packed_nack_test();
     cumulative_ack_test();
     ordered_delivery_test();
     encrypted_order_test();
