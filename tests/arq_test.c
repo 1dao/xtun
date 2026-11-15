@@ -203,8 +203,8 @@ static void feedback(Tunnel *t) {
 static void timer_test(void) {
     Pair p; init(&p); Tunnel *b=p.b;
     assert(arq_receive(b,2,1)==1); assert(b->arq->missing==1);
-    const unsigned times[]={5,25,75,175,375,575};
-    arq_tick(b); assert(b->arq->nack_due==10005 && !b->count);
+    const unsigned times[]={0,20,70,170,370,570};
+    arq_tick(b); assert(b->arq->nack_due==10000 && b->count==1);
     for (unsigned i=0;i<sizeof(times)/sizeof(times[0]);++i) {
         if (i) { b->now=10000+times[i]-1; arq_tick(b); assert(!b->count); }
         b->now=10000+times[i]; feedback(b); control(p.a);
@@ -212,10 +212,10 @@ static void timer_test(void) {
     }
     /* A new gap gets its own grace period while old gaps keep their backoff. */
     uint64_t due=b->arq->nack_due;
-    assert(arq_receive(b,4,1)==1); arq_tick(b); assert(b->arq->nack_due==b->now+5);
+    assert(arq_receive(b,4,1)==1); arq_tick(b); assert(b->arq->nack_due==b->now);
     assert(b->arq->rx[1].feedback_due==due);
     uint64_t requests=p.a->arq_requests;
-    b->now+=5; feedback(b); control(p.a);
+    feedback(b); control(p.a);
     assert(p.a->arq_requests==requests+1 && b->arq->rx[3].requested);
     assert(b->arq->rx[1].feedback_due==due && b->arq->rx[3].feedback_due==b->now+20);
     assert(arq_receive(b,1,1)==1 && arq_receive(b,3,1)==1);
@@ -226,7 +226,7 @@ static void timer_test(void) {
     unsigned before=p.ba.sent;
     assert(arq_receive(b,5,1)==1); assert(flush(b,XT_QUEUE));
     assert(p.ba.sent==before && !b->count && !b->arq->nack_queued);
-    finish(&p); puts("PASS 5ms grace, per-gap 20/50/100/200ms backoff, new-gap independence and cancellation");
+    finish(&p); puts("PASS immediate first feedback, per-gap 20/50/100/200ms backoff, new-gap independence and cancellation");
 }
 static void independent_batch_test(void) {
     Pair p; init(&p); Tunnel *b=p.b;
@@ -319,31 +319,27 @@ static void priority_test(void) {
 }
 static void reorder_test(void) {
     Pair p; init(&p); Tunnel *b=p.b;
-    /* Repeated 1ms reordering must not emit any NACK or start a repair. */
+    /* Immediate feedback can still be cancelled if the gap fills before send. */
     for (unsigned seq=1; seq<1000; seq+=2) {
         assert(arq_receive(b,(uint16_t)(seq+1),1)==1);
-        arq_tick(b); assert(!b->count && b->arq->nack_due==b->now+ARQ_REORDER);
+        arq_tick(b); assert(b->count==1 && b->arq->nack_due==b->now);
         ++b->now; assert(arq_receive(b,(uint16_t)seq,1)==1);
-        arq_tick(b); assert(!b->count && !b->arq->timer);
+        arq_tick(b); assert(flush(b,XT_QUEUE));
+        assert(!b->count && !b->arq->timer);
         b->now+=9;
     }
     assert(!b->arq_nacks && !b->arq->missing);
     finish(&p);
     init(&p); b=p.b;
-    assert(arq_receive(b,2,1)==1); arq_tick(b);
-    b->now+=ARQ_REORDER-1; arq_tick(b); assert(!b->count);
-    ++b->now; arq_tick(b); assert(b->count==1);
-    /* A new gap appears while old feedback is queued. Refreshing that
-     * message must not request the younger gap before its own grace ends. */
+    assert(arq_receive(b,2,1)==1); arq_tick(b); assert(b->count==1);
+    /* Refresh queued feedback to combine all currently missing fresh IDs. */
     assert(arq_receive(b,4,1)==1);
     assert(flush(b,XT_QUEUE)); control(p.a);
-    assert(p.a->arq_requests==1 && b->arq->rx[1].requested && !b->arq->rx[3].requested);
-    assert(b->arq->nack_due==b->now+ARQ_REORDER);
+    assert(p.a->arq_requests==2 && b->arq->rx[1].requested && b->arq->rx[3].requested);
     uint64_t old_due=b->arq->rx[1].feedback_due;
-    b->now+=ARQ_REORDER; feedback(b); control(p.a);
-    assert(p.a->arq_requests==2 && b->arq->rx[3].requested);
-    assert(b->arq->rx[1].feedback_due==old_due && b->arq->nack_due==old_due);
-    finish(&p); puts("PASS 500 short reorders without NACK and queued feedback preserves new-gap grace");
+    ++b->now; arq_tick(b);
+    assert(!b->count && b->arq->rx[1].feedback_due==old_due && b->arq->rx[3].feedback_due==old_due);
+    finish(&p); puts("PASS immediate first NACK, cancellation, fresh-gap batching and retry suppression");
 }
 static void watermark_test(void) {
     Pair p; init(&p); p.ab.drop=1; send_data(p.a);
@@ -548,10 +544,10 @@ static void feedback_rtt_test(void) {
     assert(arq_next_feedback_delay(50)==100);
     assert(arq_next_feedback_delay(100)==200);
     assert(arq_next_feedback_delay(200)==200);
-    assert(timed_recovery(0,1)==225);
-    assert(timed_recovery(1,1)==225);
-    assert(timed_recovery(0,0)==55 && timed_recovery(1,0)==55);
-    puts("PASS fixed per-gap feedback independent of RTT; healthy and lost-repair recovery");
+    assert(timed_recovery(0,1)==220);
+    assert(timed_recovery(1,1)==(ARQ_ADAPTIVE_FEEDBACK ? 125u : 220u));
+    assert(timed_recovery(0,0)==50 && timed_recovery(1,0)==50);
+    puts("PASS per-gap feedback snapshots RTT; healthy and lost-repair recovery");
 }
 static void ping_sampling_test(void) {
     Pair p; init(&p); Tunnel *a=p.a;
@@ -808,8 +804,34 @@ static void unavailable_mark_test(void) {
     finish(&p);
     puts("PASS unavailable cache prefix MARK, prompt release, no false ACK, repeat/stale validation, wire rollover and logical reset");
 }
-static void delivery_wait_test(void) {
-    Pair p; init(&p); Tunnel *b=p.b; b->dev=(XtDevice *)b; delivered_count=0;
+static void adaptive_feedback_test(void) {
+    Pair p; init(&p); Tunnel *b=p.b;
+    if (ARQ_ADAPTIVE_FEEDBACK) {
+        b->arq->srtt=b->arq->last_rtt=80;
+        assert(arq_reorder_grace(b->arq)==0 && arq_initial_feedback(b->arq)==120);
+        assert(arq_receive(b,2,1)==1);
+        arq_tick(b); assert(b->count==1 && b->arq->nack_due==b->now);
+        assert(flush(b,XT_QUEUE)); control(p.a);
+        assert(arq_receive(b,1,1)==1);
+        assert(!b->arq->missing && b->arq_nacks==1);
+        assert(arq_receive(b,4,1)==1);
+        feedback(b); control(p.a);
+        assert(b->arq_nacks==2 && b->arq->rx[3].feedback_due==b->now+120);
+        uint64_t old_due=b->arq->rx[3].feedback_due;
+        b->arq->ping_wait=1; b->arq->ping_token=7; b->arq->ping_sent=b->now-400;
+        arq_pong(b,7);
+        assert(b->arq->rx[3].feedback_due==old_due); /* no deadline postponement */
+        assert(arq_receive(b,6,1)==1 && b->arq->rx[5].feedback_due==b->now);
+        assert(b->arq->rx[5].delay==ARQ_BACKOFF_MAX);
+        assert(b->arq->rx[3].feedback_due==old_due);
+        b->arq->srtt=b->arq->last_rtt=1;
+        assert(arq_reorder_grace(b->arq)==0 && arq_initial_feedback(b->arq)==20);
+        b->arq->srtt=b->arq->last_rtt=5000;
+        assert(arq_reorder_grace(b->arq)==0 && arq_initial_feedback(b->arq)==200);
+        assert(arq_next_feedback_delay(75)==150 && arq_next_feedback_delay(150)==200);
+    }
+    finish(&p);
+    init(&p); b=p.b; b->dev=(XtDevice *)b; delivered_count=0;
     assert(arq_store_packet(b,2,"B",1)==1 && !b->arq_delivery_count);
     b->now+=37; assert(arq_store_packet(b,1,"A",1)==1);
     assert(delivered_count==2 && b->arq_delivery_count==2);
@@ -828,9 +850,10 @@ static void delivery_wait_test(void) {
     assert(b->arq_delivery_wait_bins[0]==2 && b->arq_delivery_wait_bins[5]==1);
     assert(b->arq_delivery_wait_max==ARQ_ORDER_WAIT);
     finish(&p);
-    puts("PASS delivery wait accounting, duplicates, adapter backpressure and late repairs");
-}int main(void) {
-    delivery_wait_test();
+    puts("PASS immediate fresh gaps, adaptive retries, immutable deadlines and real delivery wait accounting");
+}
+int main(void) {
+    adaptive_feedback_test();
     unavailable_mark_test();
     mark_feedback_test();
     packed_nack_test();

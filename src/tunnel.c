@@ -17,7 +17,10 @@ _Static_assert(ARQ_WINDOW < 32768u && (65536u % ARQ_WINDOW) == 0,
                "ARQ ring must divide the wire sequence space and stay below half range");
 #define ARQ_CACHE_TTL 5000u
 #define ARQ_ORDER_WAIT 3000u /* release later packets without abandoning repair */
-#define ARQ_REORDER 5u
+#define ARQ_REORDER 0u /* new gaps request repair in the current event-loop pass */
+#ifndef ARQ_ADAPTIVE_FEEDBACK
+#define ARQ_ADAPTIVE_FEEDBACK 1 /* 0 restores the fixed 20ms first retry; first requests stay immediate */
+#endif
 #define ARQ_FEEDBACK_GAP 5u
 #define ARQ_INITIAL 20u
 #define ARQ_BACKOFF_MAX 200u
@@ -141,10 +144,21 @@ static unsigned arq_cooldown(const Arq *a) {
     unsigned delay=rtt+rtt/2;
     return delay<20 ? 20 : delay>500 ? 500 : delay;
 }
-/* Each gap owns its backoff. RTT samples and unrelated repairs must not
- * restart or shorten a gap's 20/50/100/200ms request schedule. */
+/* Snapshot retry tuning when a gap is created. Later RTT samples must never
+ * postpone existing deadlines. First feedback is immediate with or without RTT. */
+static unsigned arq_reorder_grace(const Arq *a) {
+    (void)a;
+    return ARQ_REORDER;
+}
+static unsigned arq_initial_feedback(const Arq *a) {
+    if (!ARQ_ADAPTIVE_FEEDBACK || !a->srtt) return ARQ_INITIAL;
+    unsigned delay=arq_cooldown(a);
+    return delay>ARQ_BACKOFF_MAX ? ARQ_BACKOFF_MAX : delay;
+}
 static unsigned arq_next_feedback_delay(unsigned delay) {
-    return delay==20 ? 50 : delay==50 ? 100 : ARQ_BACKOFF_MAX;
+    if (delay==20) return 50;
+    if (delay==50) return 100;
+    return delay>=ARQ_BACKOFF_MAX/2 ? ARQ_BACKOFF_MAX : delay*2;
 }
 static void arq_pong(Tunnel *t, uint64_t token) {
     Arq *a=t->arq;
@@ -154,7 +168,7 @@ static void arq_pong(Tunnel *t, uint64_t token) {
     if (elapsed>5000) return;
     unsigned sample=elapsed ? (unsigned)elapsed : 1;
     a->last_rtt=sample; a->srtt=a->srtt ? (7*a->srtt+sample+4)/8 : sample;
-    arq_log(t,"rtt_sample","sample_ms=%u srtt_ms=%u cooldown_ms=%u",sample,a->srtt,arq_cooldown(a));
+    arq_log(t,"rtt_sample","sample_ms=%u srtt_ms=%u cooldown_ms=%u reorder_grace_ms=%u initial_feedback_ms=%u",sample,a->srtt,arq_cooldown(a),arq_reorder_grace(a),arq_initial_feedback(a));
 }
 static void arq_defer_clear(Tunnel *t, ArqTx *c, const char *reason) {
     if (!c->wanted) return;
@@ -169,7 +183,7 @@ static void arq_defer_clear(Tunnel *t, ArqTx *c, const char *reason) {
 /* Each missing sequence owns its grace/backoff deadline. This single cached
  * minimum drives the event loop; no scan is needed on the gap-free path. */
 static void arq_timer_update(Tunnel *t) {
-    Arq *a=t->arq; uint64_t due=UINT64_MAX; unsigned expired=0;
+    Arq *a=t->arq; uint64_t due=UINT64_MAX, first_due=UINT64_MAX; unsigned expired=0;
     for (unsigned i=0; i<ARQ_WINDOW; ++i) {
         ArqRx *r=&a->rx[i];
         if (!r->seq || r->received || r->expired) continue;
@@ -178,11 +192,14 @@ static void arq_timer_update(Tunnel *t) {
         }
         uint64_t next=r->feedback_due < r->born+ARQ_CACHE_TTL ? r->feedback_due : r->born+ARQ_CACHE_TTL;
         if (next<due) due=next;
+        if (!r->requested && next<first_due) first_due=next;
     }
     a->schedule_dirty=0;
     if (expired) arq_log(t,"gap_expired","reason=ttl count=%u missing=%u",expired,a->missing);
     if (!a->missing) { arq_timer_cancel(t,expired ? "expired" : "no_gaps"); return; }
     if (a->last_feedback && due<a->last_feedback+ARQ_FEEDBACK_GAP) due=a->last_feedback+ARQ_FEEDBACK_GAP;
+    /* Fresh gaps bypass inter-feedback spacing; repeated requests retain it. */
+    if (first_due<due) due=first_due;
     if (!a->timer || a->nack_due!=due) {
         arq_log(t,a->timer ? "timer_arm" : "timer_start",
                 "delay_ms=%llu due_ms=%llu missing=%u",
@@ -526,8 +543,8 @@ static int arq_advance(Tunnel *t, uint16_t wire, uint32_t *logical, int watermar
         for (uint32_t i = a->high+1; i <= seq; ++i) {
             ArqRx *r = &a->rx[i % ARQ_WINDOW];
             if (r->seq && !r->received && !r->expired) { --a->missing; ++t->arq_expired; ++t->arq_expired_window; ++evicted; }
-            *r = (ArqRx){.seq=i, .born=t->now, .feedback_due=t->now+ARQ_REORDER,
-                         .delay=ARQ_INITIAL, .gap=watermark || i<seq}; ++a->missing;
+            *r = (ArqRx){.seq=i, .born=t->now, .feedback_due=t->now+arq_reorder_grace(a),
+                         .delay=arq_initial_feedback(a), .gap=watermark || i<seq}; ++a->missing;
         }
         a->high = seq;
         a->schedule_dirty=1;
@@ -915,8 +932,8 @@ static void print_arq_stats(Tunnel *t) {
            (unsigned long long)t->arq_delivery_wait_bins[0],(unsigned long long)t->arq_delivery_wait_bins[1],
            (unsigned long long)t->arq_delivery_wait_bins[2],(unsigned long long)t->arq_delivery_wait_bins[3],
            (unsigned long long)t->arq_delivery_wait_bins[4],(unsigned long long)t->arq_delivery_wait_bins[5],
-           0u,ARQ_REORDER,
-           ARQ_INITIAL);
+           ARQ_ADAPTIVE_FEEDBACK,t->arq ? arq_reorder_grace(t->arq) : ARQ_REORDER,
+           t->arq ? arq_initial_feedback(t->arq) : ARQ_INITIAL);
 }
 static void print_live_stats(Tunnel *t, uint64_t start) {
     xUdpStats udp = {0};
