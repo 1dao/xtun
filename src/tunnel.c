@@ -15,7 +15,8 @@ enum { READY = 1, DATA, PING, PONG, CLOSE, ARQ_DATA, ARQ_NACK, ARQ_MARK, ARQ_NAC
 #define ARQ_WINDOW 8192u
 _Static_assert(ARQ_WINDOW < 32768u && (65536u % ARQ_WINDOW) == 0,
                "ARQ ring must divide the wire sequence space and stay below half range");
-#define ARQ_TTL 5000u
+#define ARQ_CACHE_TTL 5000u
+#define ARQ_ORDER_WAIT 200u /* release later packets without abandoning repair */
 #define ARQ_REORDER 5u
 #define ARQ_FEEDBACK_GAP 5u
 #define ARQ_INITIAL 20u
@@ -169,10 +170,10 @@ static void arq_timer_update(Tunnel *t) {
     for (unsigned i=0; i<ARQ_WINDOW; ++i) {
         ArqRx *r=&a->rx[i];
         if (!r->seq || r->received || r->expired) continue;
-        if (t->now-r->born >= ARQ_TTL) {
+        if (t->now-r->born >= ARQ_CACHE_TTL) {
             r->expired=1; --a->missing; ++t->arq_expired; ++t->arq_expired_ttl; ++expired; continue;
         }
-        uint64_t next=r->feedback_due < r->born+ARQ_TTL ? r->feedback_due : r->born+ARQ_TTL;
+        uint64_t next=r->feedback_due < r->born+ARQ_CACHE_TTL ? r->feedback_due : r->born+ARQ_CACHE_TTL;
         if (next<due) due=next;
     }
     a->schedule_dirty=0;
@@ -374,7 +375,7 @@ static int flush(Tunnel *t, unsigned budget) {
             put32(p+4, count); n = t->queue[head].len = XT_HEADER+count;
         }
         if (p[1] == ARQ_MARK && !xdtls_write_pending(t->dtls)) {
-            if (t->now-t->arq->last_data >= ARQ_TTL && t->now-t->arq->last_rx_data >= ARQ_TTL) { t->arq->mark_queued=0; arq_pop(t); continue; }
+            if (t->now-t->arq->last_data >= ARQ_CACHE_TTL && t->now-t->arq->last_rx_data >= ARQ_CACHE_TTL) { t->arq->mark_queued=0; arq_pop(t); continue; }
             put16(p+XT_HEADER, (uint16_t)t->arq->sent);
             put32(p+XT_HEADER+2, t->arq->received_through);
             unsigned feedback=arq_feedback(t,p+XT_HEADER+6);
@@ -432,8 +433,8 @@ static int flush(Tunnel *t, unsigned budget) {
     }
     return 1;
 }
-/* Force only packets about to leave the bounded ring; otherwise wait for gaps
- * until the existing repair TTL. Receipt and delivery have separate cursors. */
+/* Ordering patience is shorter than repair retention. Passing a gap releases
+ * later IP packets but leaves the gap eligible for late repair and receipt ACK. */
 static void arq_drain(Tunnel *t, uint32_t through) {
     Arq *a = t->arq;
     if (!a || !t->dev) return;
@@ -443,17 +444,17 @@ static void arq_drain(Tunnel *t, uint32_t through) {
         if (r->seq != seq) { t->failed = 1; return; }
         int forced = seq <= through;
         if (!r->received) {
-            if (!forced && !r->expired && t->now-r->born < ARQ_TTL) break;
-            if (!r->expired) {
+            if (!forced && !r->expired && t->now-r->born < ARQ_ORDER_WAIT) break;
+            if (!r->expired && (forced || t->now-r->born >= ARQ_CACHE_TTL)) {
                 r->expired = 1; --a->missing; ++t->arq_expired;
                 if (forced) ++t->arq_expired_window; else ++t->arq_expired_ttl;
                 a->schedule_dirty = 1;
             }
             ++t->arq_order_skips;
-            arq_log(t,"order_skip","seq=%u reason=%s",(uint16_t)seq,forced ? "window" : "ttl");
+            arq_log(t,"order_skip","seq=%u reason=%s",(uint16_t)seq,forced ? "window" : r->expired ? "ttl" : "order_timeout");
         } else if (r->len) {
             if (xt_device_write(t->dev, r->bytes, r->len) <= 0) {
-                if (!forced && t->now-r->born < ARQ_TTL) break;
+                if (!forced && t->now-r->born < ARQ_CACHE_TTL) break;
                 ++t->drops; ++t->drop_tun_write;
             } else { ++t->rx_packets; t->rx_bytes += r->len; }
             r->len = 0; --a->buffered;
@@ -496,7 +497,7 @@ static int arq_receive(Tunnel *t, uint16_t wire, int delivered) {
     uint32_t seq; int rc = arq_advance(t, wire, &seq, 0);
     if (rc <= 0) return rc;
     ArqRx *r = &t->arq->rx[seq % ARQ_WINDOW];
-    if (seq <= t->arq->delivered) { ++t->arq_duplicates; return 0; }
+    if (seq <= t->arq->delivered && r->expired) { ++t->arq_duplicates; return 0; }
     if (r->received) { ++t->arq_duplicates; arq_log(t,"duplicate","seq=%u logical_seq=%u",wire,seq); return 0; }
     if (delivered) {
         if (r->requested) ++t->arq_recovered; /* gap filled, possibly by a late original */
@@ -520,6 +521,20 @@ static int arq_store_packet(Tunnel *t, uint16_t wire, const void *ip, size_t len
     if (accepted <= 0) return accepted;
     uint32_t seq = t->arq->high - (uint16_t)((uint16_t)t->arq->high-wire);
     ArqRx *r = &t->arq->rx[seq % ARQ_WINDOW];
+    if (seq <= t->arq->delivered) {
+        /* Ordering already moved on. Late repairs remain useful to inner flows.
+         * Do not ACK a failed local write: leave the gap eligible for retry. */
+        if (t->now-r->born >= ARQ_CACHE_TTL) return 0;
+        if (xt_device_write(t->dev,ip,len)<=0) {
+            arq_log(t,"delivery_failed","seq=%u reason=late_tun_write",wire);
+            return 0;
+        }
+        arq_receive(t,wire,1);
+        ++t->rx_packets; t->rx_bytes+=len;
+        arq_log(t,"late_delivered","seq=%u logical_seq=%u age_ms=%llu",wire,seq,
+                (unsigned long long)(t->now-r->born));
+        return 1;
+    }
     memcpy(r->bytes, ip, len); r->len = len;
     ++t->arq->buffered;
     if (seq != t->arq->delivered+1) ++t->arq_order_waits;
@@ -533,7 +548,7 @@ static int arq_store_packet(Tunnel *t, uint16_t wire, const void *ip, size_t len
  * NACK would cause an unnecessary second repair without positive ACKs. */
 static void arq_try_repair(Tunnel *t, ArqTx *c, int from_nack) {
     uint16_t seq=(uint16_t)c->seq;
-    if (t->now-c->born>=ARQ_TTL) { arq_defer_clear(t,c,"ttl"); return; }
+    if (t->now-c->born>=ARQ_CACHE_TTL) { arq_defer_clear(t,c,"ttl"); return; }
     if (c->queued || c->retries>=ARQ_REPAIR_LIMIT || t->now<c->retry_at) return;
     size_t cost = XT_HEADER+c->len;
     unsigned reason=t->count>=XT_QUEUE-4 ? 1 : 0;
@@ -549,7 +564,7 @@ static void arq_try_repair(Tunnel *t, ArqTx *c, int from_nack) {
     }
     unsigned tail = (t->head+t->count) % XT_QUEUE;
     if (!enqueue(t, ARQ_DATA, c->bytes, c->len)) return;
-    t->queue[tail].retry = 1; t->queue[tail].expires = c->born+ARQ_TTL;
+    t->queue[tail].retry = 1; t->queue[tail].expires = c->born+ARQ_CACHE_TTL;
     uint64_t wait=c->wanted ? t->now-c->wanted_at : 0;
     if (c->wanted) {
         ++t->arq_deferred_queued;
@@ -579,7 +594,7 @@ static void arq_request(Tunnel *t, uint16_t seq) {
     unsigned back=(uint16_t)((uint16_t)t->arq->sent-seq);
     if (back<32768 && t->arq->sent>=back && t->arq->sent-back<=t->arq->peer_received) return;
     ArqTx *c=&t->arq->tx[seq%ARQ_WINDOW];
-    if (!c->seq || (uint16_t)c->seq!=seq || t->now-c->born>=ARQ_TTL) {
+    if (!c->seq || (uint16_t)c->seq!=seq || t->now-c->born>=ARQ_CACHE_TTL) {
         int absent=!c->seq || (uint16_t)c->seq!=seq;
         ++t->arq_cache_miss;
         if (absent) ++t->arq_cache_absent; else ++t->arq_cache_ttl;
@@ -639,7 +654,7 @@ static void arq_tick(Tunnel *t) {
     arq_drain(t, 0);
     arq_retry_deferred(t);
     if ((a->sent || a->high) && !a->mark_queued &&
-        (t->now-a->last_data < ARQ_TTL || t->now-a->last_rx_data < ARQ_TTL) &&
+        (t->now-a->last_data < ARQ_CACHE_TTL || t->now-a->last_rx_data < ARQ_CACHE_TTL) &&
         t->now-a->last_mark >= ARQ_MARK_INTERVAL && t->count < XT_QUEUE-2) {
         unsigned char mark[6]; put16(mark, (uint16_t)a->sent);
         put32(mark+2, a->received_through);
@@ -813,13 +828,13 @@ static void print_arq_stats(Tunnel *t) {
     printf(" defer_wait_sum_ms=%llu defer_wait_0_10_ms=%llu defer_wait_11_50_ms=%llu "
            "defer_wait_51_100_ms=%llu defer_wait_101_250_ms=%llu "
            "defer_wait_251_500_ms=%llu defer_wait_gt500_ms=%llu "
-           "order_buffered=%u order_waits=%llu order_skips=%llu\n",
+           "order_buffered=%u order_waits=%llu order_skips=%llu order_wait_ms=%u cache_ttl_ms=%u\n",
            (unsigned long long)t->arq_defer_wait_sum,
            (unsigned long long)t->arq_defer_wait_bins[0],(unsigned long long)t->arq_defer_wait_bins[1],
            (unsigned long long)t->arq_defer_wait_bins[2],(unsigned long long)t->arq_defer_wait_bins[3],
            (unsigned long long)t->arq_defer_wait_bins[4],(unsigned long long)t->arq_defer_wait_bins[5],
            t->arq ? t->arq->buffered : 0,
-           (unsigned long long)t->arq_order_waits,(unsigned long long)t->arq_order_skips);
+           (unsigned long long)t->arq_order_waits,(unsigned long long)t->arq_order_skips,ARQ_ORDER_WAIT,ARQ_CACHE_TTL);
 }
 static void print_live_stats(Tunnel *t, uint64_t start) {
     xUdpStats udp = {0};

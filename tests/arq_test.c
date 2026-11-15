@@ -31,20 +31,23 @@ static void ordered_delivery_test(void) {
     assert(arq_store_packet(t, 2, "B", 1) == 1);
     assert(!delivered_count && t->arq->buffered == 1 && t->arq->missing == 1);
     assert(arq_store_packet(t, 2, "B", 1) == 0);
-    t->now += 4000; arq_drain(t,0);
+    t->now += ARQ_ORDER_WAIT-1; arq_drain(t,0);
     assert(!delivered_count && t->arq->buffered == 1 && t->arq->missing == 1);
     assert(arq_store_packet(t, 1, "A", 1) == 1);
     assert(delivered_count == 2 && !memcmp(delivered_bytes,"AB",2));
     assert(!t->arq->buffered && !t->arq->missing);
     assert(arq_store_packet(t, 4, "D", 1) == 1);
-    t->now += ARQ_TTL-1; arq_drain(t,0); assert(delivered_count == 2);
+    t->now += ARQ_ORDER_WAIT-1; arq_drain(t,0); assert(delivered_count == 2);
     ++t->now; arq_drain(t,0);
     assert(delivered_count == 3 && delivered_bytes[2] == 'D' && t->arq_order_skips == 1);
+    assert(t->arq->missing==1 && !t->arq->rx[3].expired);
+    assert(arq_store_packet(t, 3, "C", 1) == 1);
+    assert(delivered_count==4 && delivered_bytes[3]=='C' && !t->arq->missing);
     assert(arq_store_packet(t, 3, "C", 1) == 0);
     delivery_blocked = 1;
-    assert(arq_store_packet(t, 5, "E", 1) == 1 && delivered_count == 3);
+    assert(arq_store_packet(t, 5, "E", 1) == 1 && delivered_count == 4);
     delivery_blocked = 0; arq_drain(t,0);
-    assert(delivered_count == 4 && delivered_bytes[3] == 'E');
+    assert(delivered_count == 5 && delivered_bytes[4] == 'E');
     /* Filling the ring must drain before overwriting queued payloads. */
     for (unsigned i=7; i<=ARQ_WINDOW+6; ++i) {
         unsigned char byte=(unsigned char)i;
@@ -58,11 +61,54 @@ static void ordered_delivery_test(void) {
     assert(delivered_count==2 && !memcmp(delivered_bytes,"AB",2) && t->arq->delivered==65536);
     delivery_blocked=1;
     assert(arq_store_packet(t,1,"C",1)==1);
-    t->now+=ARQ_TTL; arq_drain(t,0);
+    t->now+=ARQ_CACHE_TTL; arq_drain(t,0);
     assert(!t->arq->buffered && t->drop_tun_write==1 && delivered_count==2);
     delivery_blocked=0;
     free(t->arq); free(t);
     puts("PASS ordered delivery, deduplication, timeout, local retry and ring eviction");
+}
+
+static void separate_order_deadline_test(void) {
+    XtConfig cfg={0}; Tunnel *t=calloc(1,sizeof(*t)); assert(t);
+    t->cfg=&cfg; t->arq=calloc(1,sizeof(Arq)); assert(t->arq);
+    t->dev=(XtDevice *)t; t->now=10000; delivered_count=0;
+    assert(arq_store_packet(t,2,"B",1)==1);
+    t->now+=ARQ_ORDER_WAIT-1; arq_drain(t,0); assert(!delivered_count);
+    ++t->now; arq_drain(t,0);
+    assert(delivered_count==1 && delivered_bytes[0]=='B');
+    assert(t->arq->missing==1 && !t->arq->rx[1].expired && !t->arq_expired);
+    assert(t->arq->received_through==0);
+    unsigned char feedback[ARQ_NACK_BYTES]; uint16_t ids[ARQ_WINDOW];
+    unsigned n=arq_feedback(t,feedback);
+    assert(arq_nack_decode(ARQ_NACK_PACKED,feedback,n,ids)==1 && ids[0]==1);
+    t->now+=1000; delivery_blocked=1;
+    assert(arq_store_packet(t,1,"A",1)==0 && t->arq->missing==1 && !t->arq->rx[1].received);
+    delivery_blocked=0;
+    assert(arq_store_packet(t,1,"A",1)==1);
+    assert(delivered_count==2 && !memcmp(delivered_bytes,"BA",2));
+    assert(t->arq->received_through==2 && !t->arq->missing);
+    assert(arq_store_packet(t,1,"A",1)==0 && delivered_count==2);
+    /* Recovery remains possible just before the independent cache deadline. */
+    assert(arq_store_packet(t,4,"D",1)==1);
+    t->now+=ARQ_CACHE_TTL-1; arq_drain(t,0);
+    assert(arq_store_packet(t,3,"C",1)==1 && t->arq->received_through==4);
+    assert(delivered_count==4 && !memcmp(delivered_bytes,"BADC",4));
+    assert(arq_store_packet(t,6,"F",1)==1);
+    t->now+=ARQ_ORDER_WAIT; arq_drain(t,0);
+    t->now+=ARQ_CACHE_TTL-ARQ_ORDER_WAIT;
+    assert(arq_store_packet(t,5,"E",1)==0 && delivered_count==5);
+    arq_timer_update(t); assert(!t->arq->missing && t->arq_expired_ttl==1);
+    assert(t->arq->received_through==4);
+    /* Late delivery and cumulative receipt also work across wire rollover. */
+    memset(t->arq,0,sizeof(*t->arq)); delivered_count=0;
+    t->arq->high=t->arq->delivered=t->arq->received_through=65534;
+    assert(arq_store_packet(t,0,"B",1)==1);
+    t->now+=ARQ_ORDER_WAIT; arq_drain(t,0);
+    assert(arq_store_packet(t,65535,"A",1)==1);
+    assert(t->arq->received_through==65536 && delivered_count==2 && !memcmp(delivered_bytes,"BA",2));
+    assert(arq_store_packet(t,65535,"A",1)==0);
+    free(t->arq); free(t);
+    puts("PASS independent 200ms ordering and 5s repair, late delivery, deduplication, local backpressure and rollover");
 }
 
 typedef struct {
@@ -124,8 +170,18 @@ static void encrypted_order_test(void) {
     assert(receive_messages(p.b));
     assert(delivered_count==2 && p.b->rx_packets==2 && p.b->rx_bytes==40);
     assert(!p.b->arq->buffered && !p.b->arq->missing && p.b->arq->delivered==2);
+    p.ab.drop=1;
+    assert(enqueue(p.a,DATA,packet,sizeof(packet)) && flush(p.a,XT_QUEUE));
+    assert(enqueue(p.a,DATA,packet,sizeof(packet)) && flush(p.a,XT_QUEUE));
+    assert(receive_messages(p.b) && delivered_count==2);
+    p.b->now+=ARQ_ORDER_WAIT; p.a->now=p.b->now; arq_tick(p.b);
+    assert(delivered_count==3 && p.b->arq->missing==1 && p.b->arq->received_through==2);
+    assert(flush(p.b,XT_QUEUE) && receive_messages(p.a) && flush(p.a,XT_QUEUE));
+    assert(receive_messages(p.b));
+    assert(delivered_count==4 && p.b->arq->received_through==4 && !p.b->arq->missing);
+    assert(!p.b->arq_expired && !p.b->arq->buffered);
     finish(&p);
-    puts("PASS real DTLS receive path holds later IP packet until repair arrives");
+    puts("PASS real DTLS ordered recovery and late IP delivery after ordering timeout");
 }
 static void send_data(Tunnel *t) {
     assert(enqueue(t,DATA,"packet",6)); assert(flush(t,XT_QUEUE));
@@ -201,7 +257,7 @@ static void long_recovery_test(void) {
     }
     assert(take_data(p.b,1)==1 && !p.b->arq->missing);
     assert(p.a->arq_retransmits==21 && !p.a->arq_retry_skip);
-    p.a->now=10000+ARQ_TTL;
+    p.a->now=10000+ARQ_CACHE_TTL;
     arq_request(p.a,1); assert(!p.a->count && p.a->arq_cache_ttl==1);
     finish(&p); puts("PASS twenty lost repairs still recover after 4.2s, expiry remains bounded");
 }
@@ -296,7 +352,7 @@ static void watermark_test(void) {
     feedback(p.b); control(p.a); assert(p.a->count==1 && flush(p.a,1));
     assert(take_data(p.b,1)==1); /* no later DATA was needed */
     p.a->now+=200; feedback(p.a); control(p.b); assert(!p.b->arq->missing);
-    p.a->now=p.a->arq->last_data+ARQ_TTL; arq_tick(p.a); assert(!p.a->count); /* stop after cache lifetime */
+    p.a->now=p.a->arq->last_data+ARQ_CACHE_TTL; arq_tick(p.a); assert(!p.a->count); /* stop after cache lifetime */
     finish(&p); puts("PASS 200ms sender-only watermark, tail recovery and idle suppression");
 }
 static void wrap_test(void) {
@@ -322,12 +378,12 @@ static void wrap_test(void) {
 static void bounds_test(void) {
     Pair p; init(&p); send_data(p.a); assert(take_data(p.b,1)==1);
     arq_request(p.a,1); assert(p.a->count==1 && !p.a->arq_limited);
-    p.a->now+=ARQ_TTL; assert(flush(p.a,1));
+    p.a->now+=ARQ_CACHE_TTL; assert(flush(p.a,1));
     assert(!p.a->count && !p.a->arq_retransmits && !p.a->arq->tx[1].queued);
     arq_request(p.a,1); assert(!p.a->count && p.a->arq_cache_miss==1);
     assert(arq_receive(p.b,3,0)==1); /* failed TUN injection stays missing */
     assert(p.b->arq->missing==2);
-    p.b->now+=ARQ_TTL; feedback(p.b);
+    p.b->now+=ARQ_CACHE_TTL; feedback(p.b);
     assert(!p.b->arq->missing && !p.b->arq->timer && !p.b->count);
     finish(&p); puts("PASS unbudgeted repair, repair expiry, local delivery failure and timer expiry");
 }
@@ -371,7 +427,7 @@ static void wait_stats_test(void) {
     assert(p.a->arq_defer_wait_sum==total);
     for (unsigned i=0;i<6;++i) assert(p.a->arq_defer_wait_bins[i]==2);
     p.ab.drop=1; send_data(p.a); p.a->count=XT_QUEUE-4; arq_request(p.a,13);
-    p.a->now+=ARQ_TTL; arq_retry_deferred(p.a);
+    p.a->now+=ARQ_CACHE_TTL; arq_retry_deferred(p.a);
     assert(!p.a->arq->pending && p.a->arq_deferred_expired==1);
     assert(p.a->arq_deferred_queued==12 && p.a->arq_defer_wait_sum==total);
     finish(&p); puts("PASS deferred wait histogram boundaries, sum and exclusion of abandoned requests");
@@ -388,7 +444,7 @@ static void queued_test(void) {
     send_data(p.a); assert(take_data(p.b,1)==0);
     arq_request(p.a,1); p.ab.block=1; assert(flush(p.a,1));
     assert(xdtls_write_pending(p.a->dtls));
-    p.a->now+=ARQ_TTL;
+    p.a->now+=ARQ_CACHE_TTL;
     assert(flush(p.a,1)); assert(!xdtls_write_pending(p.a->dtls) && p.a->arq_retransmits==1);
     assert(take_data(p.b,1)==0);
     finish(&p); puts("PASS pending NACK/repair stays immutable across gap cancellation and expiry");
@@ -399,7 +455,7 @@ static void batch_test(void) {
     feedback(p.b); control(p.a); assert(p.a->arq_requests==599);
     p.b->now+=20; feedback(p.b); control(p.a);
     assert(p.b->arq->rx[599].requested); /* all 599 gaps fit in one range; retries remain per-gap */
-    p.b->now+=ARQ_TTL; feedback(p.b); assert(!p.b->count && !p.b->arq->missing);
+    p.b->now+=ARQ_CACHE_TTL; feedback(p.b); assert(!p.b->count && !p.b->arq->missing);
     unsigned char malformed[XT_HEADER+2*ARQ_BATCH+2]={1,ARQ_NACK,0,0};
     put32(malformed+4,1);
     assert(xdtls_write(p.a->dtls,malformed,XT_HEADER+1)==XT_HEADER+1); control(p.b);
@@ -431,7 +487,7 @@ static void logging_test(void) {
     p.a->now+=200; feedback(p.a); control(p.b);
     p.ab.drop=1; send_data(p.a); /* tail gap is exposed by the watermark */
     p.a->now+=200; feedback(p.a); control(p.b); feedback(p.b); control(p.a);
-    p.b->now+=ARQ_TTL; feedback(p.b);
+    p.b->now+=ARQ_CACHE_TTL; feedback(p.b);
     uint16_t seqs[20]; for (unsigned i=0;i<20;++i) seqs[i]=(uint16_t)i;
     arq_log_batch(p.b,"preview",seqs,20);
     reset(p.b);
@@ -555,7 +611,7 @@ static void cumulative_ack_test(void) {
     assert(arq_receive(p.b,3,1)==1 && p.b->arq->received_through==4);
     p.b->dev=(XtDevice *)p.b;
     assert(arq_receive(p.b,6,1)==1);
-    p.b->now+=ARQ_TTL; arq_drain(p.b,0);
+    p.b->now+=ARQ_CACHE_TTL; arq_drain(p.b,0);
     assert(p.b->arq->received_through==4); /* TTL skip is not receipt */
     /* Full logical ACKs do not alias on 16-bit wire sequence rollover. */
     memset(p.b->arq,0,sizeof(*p.b->arq));
@@ -697,6 +753,7 @@ int main(void) {
     packed_nack_test();
     cumulative_ack_test();
     ordered_delivery_test();
+    separate_order_deadline_test();
     encrypted_order_test();
     independent_batch_test(); long_recovery_test();
     timer_test(); recovery_test(); priority_test(); reorder_test(); watermark_test(); wrap_test(); bounds_test(); queued_test(); batch_test();
