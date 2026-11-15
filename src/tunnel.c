@@ -29,7 +29,7 @@ _Static_assert(ARQ_WINDOW < 32768u && (65536u % ARQ_WINDOW) == 0,
 enum { ARQ_IDS, ARQ_RANGE, ARQ_BITMAP };
 typedef struct {
     uint32_t seq;
-    uint64_t born, feedback_due;
+    uint64_t born, feedback_due, received_at;
     unsigned delay;
     int received, expired, requested, gap;
     size_t len;
@@ -102,6 +102,8 @@ typedef struct {
     Arq *arq;
     uint64_t arq_nacks, arq_requests, arq_retransmits, arq_recovered, arq_duplicates;
     uint64_t arq_order_waits, arq_order_skips;
+    uint64_t arq_delivery_count, arq_delivery_wait_sum, arq_delivery_wait_max;
+    uint64_t arq_delivery_wait_bins[6];
     uint64_t arq_cache_overwritten, arq_cache_report_at;
     uint64_t arq_expired, arq_cache_miss, arq_limited;
     uint64_t arq_expired_ttl, arq_expired_window, arq_expired_remote, arq_cache_absent, arq_cache_ttl;
@@ -458,6 +460,15 @@ static int flush(Tunnel *t, unsigned budget) {
     }
     return 1;
 }
+/* Time from receipt to successful TUN delivery, including ordering and
+ * local adapter backpressure. Late repairs delivered immediately count as zero. */
+static void arq_delivery_stats(Tunnel *t, const ArqRx *r) {
+    uint64_t wait=t->now-r->received_at;
+    ++t->arq_delivery_count; t->arq_delivery_wait_sum+=wait;
+    if (wait>t->arq_delivery_wait_max) t->arq_delivery_wait_max=wait;
+    unsigned bin=wait==0 ? 0 : wait<=10 ? 1 : wait<=50 ? 2 : wait<=100 ? 3 : wait<=250 ? 4 : 5;
+    ++t->arq_delivery_wait_bins[bin];
+}
 /* Ordering patience is shorter than repair retention. Passing a gap releases
  * later IP packets but leaves the gap eligible for late repair and receipt ACK. */
 static void arq_drain(Tunnel *t, uint32_t through) {
@@ -481,7 +492,7 @@ static void arq_drain(Tunnel *t, uint32_t through) {
             if (xt_device_write(t->dev, r->bytes, r->len) <= 0) {
                 if (!forced && t->now-r->born < ARQ_CACHE_TTL) break;
                 ++t->drops; ++t->drop_tun_write;
-            } else { ++t->rx_packets; t->rx_bytes += r->len; }
+            } else { ++t->rx_packets; t->rx_bytes += r->len; arq_delivery_stats(t,r); }
             r->len = 0; --a->buffered;
         }
         a->delivered = seq;
@@ -541,7 +552,7 @@ static int arq_receive(Tunnel *t, uint16_t wire, int delivered) {
     if (r->received) { ++t->arq_duplicates; arq_log(t,"duplicate","seq=%u logical_seq=%u",wire,seq); return 0; }
     if (delivered) {
         if (r->requested) ++t->arq_recovered; /* gap filled, possibly by a late original */
-        r->received = 1;
+        r->received = 1; r->received_at=t->now;
         while (t->arq->received_through < t->arq->high) {
             uint32_t next=t->arq->received_through+1;
             ArqRx *contiguous=&t->arq->rx[next%ARQ_WINDOW];
@@ -570,7 +581,7 @@ static int arq_store_packet(Tunnel *t, uint16_t wire, const void *ip, size_t len
             return 0;
         }
         arq_receive(t,wire,1);
-        ++t->rx_packets; t->rx_bytes+=len;
+        ++t->rx_packets; t->rx_bytes+=len; arq_delivery_stats(t,r);
         arq_log(t,"late_delivered","seq=%u logical_seq=%u age_ms=%llu",wire,seq,
                 (unsigned long long)(t->now-r->born));
         return 1;
@@ -896,6 +907,16 @@ static void print_arq_stats(Tunnel *t) {
            (unsigned long long)t->arq_defer_wait_bins[4],(unsigned long long)t->arq_defer_wait_bins[5],
            t->arq ? t->arq->buffered : 0,
            (unsigned long long)t->arq_order_waits,(unsigned long long)t->arq_order_skips,ARQ_ORDER_WAIT,ARQ_CACHE_TTL,(unsigned long long)t->arq_expired_remote,ARQ_WINDOW);
+    printf("ARQ_DELIVERY packets=%llu wait_sum_ms=%llu wait_max_ms=%llu "
+           "wait_0_ms=%llu wait_1_10_ms=%llu wait_11_50_ms=%llu wait_51_100_ms=%llu "
+           "wait_101_250_ms=%llu wait_gt250_ms=%llu adaptive_feedback=%u reorder_grace_ms=%u initial_feedback_ms=%u\n",
+           (unsigned long long)t->arq_delivery_count,(unsigned long long)t->arq_delivery_wait_sum,
+           (unsigned long long)t->arq_delivery_wait_max,
+           (unsigned long long)t->arq_delivery_wait_bins[0],(unsigned long long)t->arq_delivery_wait_bins[1],
+           (unsigned long long)t->arq_delivery_wait_bins[2],(unsigned long long)t->arq_delivery_wait_bins[3],
+           (unsigned long long)t->arq_delivery_wait_bins[4],(unsigned long long)t->arq_delivery_wait_bins[5],
+           0u,ARQ_REORDER,
+           ARQ_INITIAL);
 }
 static void print_live_stats(Tunnel *t, uint64_t start) {
     xUdpStats udp = {0};

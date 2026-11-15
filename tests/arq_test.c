@@ -808,7 +808,29 @@ static void unavailable_mark_test(void) {
     finish(&p);
     puts("PASS unavailable cache prefix MARK, prompt release, no false ACK, repeat/stale validation, wire rollover and logical reset");
 }
-int main(void) {
+static void delivery_wait_test(void) {
+    Pair p; init(&p); Tunnel *b=p.b; b->dev=(XtDevice *)b; delivered_count=0;
+    assert(arq_store_packet(b,2,"B",1)==1 && !b->arq_delivery_count);
+    b->now+=37; assert(arq_store_packet(b,1,"A",1)==1);
+    assert(delivered_count==2 && b->arq_delivery_count==2);
+    assert(b->arq_delivery_wait_sum==37 && b->arq_delivery_wait_max==37);
+    assert(b->arq_delivery_wait_bins[0]==1 && b->arq_delivery_wait_bins[2]==1);
+    assert(arq_store_packet(b,2,"B",1)==0 && b->arq_delivery_count==2);
+    delivery_blocked=1; assert(arq_store_packet(b,3,"C",1)==1);
+    assert(b->arq_delivery_count==2);
+    b->now+=50; delivery_blocked=0; arq_drain(b,0);
+    assert(b->arq_delivery_count==3 && b->arq_delivery_wait_sum==87 && b->arq_delivery_wait_max==50);
+    assert(b->arq_delivery_wait_bins[2]==2);
+    assert(arq_store_packet(b,5,"E",1)==1);
+    b->now+=ARQ_ORDER_WAIT; arq_drain(b,0);
+    ++b->now; assert(arq_store_packet(b,4,"D",1)==1);
+    assert(b->arq_delivery_count==5 && b->arq_delivery_wait_sum==87+ARQ_ORDER_WAIT);
+    assert(b->arq_delivery_wait_bins[0]==2 && b->arq_delivery_wait_bins[5]==1);
+    assert(b->arq_delivery_wait_max==ARQ_ORDER_WAIT);
+    finish(&p);
+    puts("PASS delivery wait accounting, duplicates, adapter backpressure and late repairs");
+}int main(void) {
+    delivery_wait_test();
     unavailable_mark_test();
     mark_feedback_test();
     packed_nack_test();
