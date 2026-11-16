@@ -122,7 +122,7 @@ if not "%TARGET%"=="console" (
     set "FLAGS=!SAVED_FLAGS!"
     rc /nologo /Iui /fo "%OBJ%\xtun.res" ui\xtun.rc
     if errorlevel 1 exit /b 1
-    link %LINKFLAGS% /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup /OUT:bin\xtun-gui.exe !UI_OBJS! %OBJ%\ui_main.obj %APP_OBJS% %CORE_OBJS% %MBED_OBJS% !RAY_OBJS! %OBJ%\xtun.res %OBJ%\wintun.res %LIBS% opengl32.lib gdi32.lib shell32.lib user32.lib
+    link %LINKFLAGS% /MANIFEST:NO /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup /OUT:bin\xtun-gui.exe !UI_OBJS! %OBJ%\ui_main.obj %APP_OBJS% %CORE_OBJS% %MBED_OBJS% !RAY_OBJS! %OBJ%\xtun.res %OBJ%\wintun.res %LIBS% opengl32.lib gdi32.lib shell32.lib user32.lib
     if errorlevel 1 exit /b 1
     type ui\vendor\*LICENSE.txt > bin\raygui-notices.txt
     if errorlevel 1 exit /b 1

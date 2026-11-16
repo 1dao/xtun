@@ -110,8 +110,15 @@ The GUI needs no Lua script or raygui DLL at runtime.
 `xtun` on Linux). Use `mingw32-make all gui` to build both Windows programs.
 macOS tunnel support is not implemented.
 
-From the directory where you keep `client.cfg`, launch `xtun-gui.exe` as
-administrator. For example, run this from the project root in PowerShell:
+The GUI requests administrator privileges automatically through its embedded
+manifest. Launching it normally displays the Windows UAC prompt when elevation
+is needed; approval (or administrator credentials) is still required. Workers
+inherit the elevated token. Windows may block elevation-requiring programs in
+the registry Run startup list; this does not provide silent startup elevation.
+The standalone console program retains its normal execution level.
+
+Launch the GUI from the directory where you keep `client.cfg`. For example,
+run this from the project root in PowerShell:
 
 ```powershell
 Start-Process .\bin\xtun-gui.exe -Verb RunAs -WorkingDirectory (Get-Location).Path
