@@ -1,8 +1,8 @@
 # Built by the SCM "make srpm" method using .copr/Makefile.
-# Version 0 is a snapshot baseline until the project has a release version.
+# Increment Version or Release for each published update.
 Name:           xtun
-Version:        0
-Release:        0.%{?snapshot:%{snapshot}}%{!?snapshot:1}%{?dist}
+Version:        1.0.0
+Release:        1%{?dist}
 Summary:        Experimental encrypted IPv4 tunnel with client and server modes
 
 License:        BSD-2-Clause AND Apache-2.0

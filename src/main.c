@@ -5,7 +5,57 @@
 #include <stdio.h>
 #include <string.h>
 
+static void print_help(FILE *out) {
+    fputs("XTun: DTLS encrypted IPv4 tunnel\n"
+          "Usage:\n"
+          "  xtun keygen [FILE]\n"
+          "  xtun client [--tag TAG] [--check|--probe]\n"
+          "  xtun server [--foreground] [--check|--probe]\n"
+          "  xtun --help\n"
+          "\n"
+          "Configuration files: client.cfg / server.cfg in the current directory.\n"
+          "Generate a key with 'xtun keygen'; replace <PSK> in BOTH files with\n"
+          "the same generated 64-hex-character key. Replace 192.0.2.2 with\n"
+          "the server's reachable numeric IPv4 address.\n"
+          "\n"
+          "Example client.cfg (split routes to networks behind the server):\n"
+          "  endpoint=192.0.2.2\n"
+          "  port=51215\n"
+          "  psk=<PSK>\n"
+          "  address=10.77.0.2\n"
+          "  peer_address=10.77.0.1\n"
+          "  full_tunnel=false\n"
+          "  routes=10.10.0.0/16,10.20.0.0/16\n"
+          "\n"
+          "Example server.cfg:\n"
+          "  bind=0.0.0.0\n"
+          "  port=51215\n"
+          "  psk=<PSK>\n"
+          "  address=10.77.0.1\n"
+          "  peer_address=10.77.0.2\n"
+          "  local_networks=10.10.0.0/16,10.20.0.0/16\n"
+          "\n"
+          "Check configuration without network changes:\n"
+          "  xtun client --check\n"
+          "  xtun server --check\n"
+          "\n"
+          "Replace the example networks with the server-side networks to access.\n"
+          "routes accepts comma-separated IPv4 CIDRs; local_networks allows\n"
+          "those destinations on the server. Configure IPv4 forwarding and\n"
+          "NAT or return routing on the server/network as needed. Omit both\n"
+          "lines if only tunnel peer access is needed.\n"
+          "Windows clients can use full_tunnel=true (the Windows default);\n"
+          "the server then needs local_networks=0.0.0.0/0, IPv4 forwarding\n"
+          "and NAT or return routing. See examples/ for Linux gateway hooks.\n"
+          "Linux servers run in the background by default and log to server.log;\n"
+          "use --foreground to keep the server in the terminal.\n", out);
+}
+
 int main(int argc, char **argv) {
+    if (argc == 2 && (!strcmp(argv[1], "--help") || !strcmp(argv[1], "-h"))) {
+        print_help(stdout);
+        return 0;
+    }
     if ((argc == 2 || argc == 3) && !strcmp(argv[1], "keygen")) {
         unsigned char key[32]; char hex[65];
         if (!xt_random(key, sizeof(key))) return 1;
@@ -16,7 +66,7 @@ int main(int argc, char **argv) {
         return ok ? 0 : 1;
     }
     if (argc < 2 || argc > 5 || (strcmp(argv[1], "client") && strcmp(argv[1], "server"))) {
-        fputs("XTun: DTLS encrypted IPv4 tunnel\nUsage:\n  xtun keygen [FILE]\n  xtun client [--tag TAG] [--check|--probe]\n  xtun server [--foreground] [--check|--probe]\n", stderr); return 1;
+        print_help(stderr); return 1;
     }
     XtConfig cfg = {0}; cfg.server = !strcmp(argv[1], "server");
     const char *tag = NULL;

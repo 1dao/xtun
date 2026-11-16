@@ -36,6 +36,10 @@ MBED_SRCS := $(wildcard $(XNET_ROOT)/3rd/mbedtls3/library/*.c)
 MBED_OBJS := $(patsubst $(XNET_ROOT)/3rd/mbedtls3/library/%.c,$(BUILD)/mbed/%.o,$(MBED_SRCS))
 CORE_NAMES := xargs xudp xpoll xsock xlog xdaemon
 CORE_OBJS := $(addprefix $(BUILD)/core/,$(addsuffix .o,$(CORE_NAMES)))
+# GCC 4.8 advertises C11 in gnu11 mode but lacks _Thread_local. Compile
+# xlog as GNU C99 so its existing GNU __thread fallback is selected.
+# override also applies when RPM supplies CFLAGS on the command line.
+$(BUILD)/core/xlog.o: override CFLAGS += -std=gnu99
 APP_OBJS := $(addprefix $(BUILD)/app/,$(addsuffix .o,main config tunnel platform xdtls))
 TEST_APP_OBJS := $(filter-out $(BUILD)/app/main.o,$(APP_OBJS))
 .PHONY: all test clean gui clean-intermediates

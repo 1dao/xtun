@@ -29,7 +29,5 @@ srpm:
 	git -C "$(ROOT)/core" archive HEAD LICENSE xargs.c xargs.h xudp.c xudp.h xpoll.c xpoll.h xhash.h xsock.c xsock.h xlog.c xlog.h xdaemon.c xdaemon.h xmacro.h 3rd/mbedtls3 | tar -x -C "$$work/tree/$$prefix/core"; \
 	tar -czf "$$work/rpm/SOURCES/$$prefix.tar.gz" -C "$$work/tree" "$$prefix"; \
 	curl --fail --location --retry 3 https://raw.githubusercontent.com/Mbed-TLS/mbedtls/mbedtls-3.6.5/LICENSE -o "$$work/rpm/SOURCES/LICENSE"; \
-	snapshot=$$(git -C "$(ROOT)" show -s --format=%cd --date=format:%Y%m%d%H%M%S HEAD).git$$(git -C "$(ROOT)" rev-parse --short=12 HEAD); \
-	printf '%%global snapshot %s\n' "$$snapshot" > "$$work/rpm/SPECS/xtun.spec"; \
-	cat "$(spec)" >> "$$work/rpm/SPECS/xtun.spec"; \
+	cp "$(spec)" "$$work/rpm/SPECS/xtun.spec"; \
 	rpmbuild -bs --define "_topdir $$work/rpm" --define "_srcrpmdir $(abspath $(outdir))" "$$work/rpm/SPECS/xtun.spec"
