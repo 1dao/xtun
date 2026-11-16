@@ -6,6 +6,10 @@
 #include "xudp.h"
 #include "xpoll.h"
 #include "xtun.h"
+#include "../core/3rd/mbedtls3/library/ssl_misc.h"
+#ifndef MBEDTLS_SSL_DTLS_REPLAY_WINDOW
+#define MBEDTLS_SSL_DTLS_REPLAY_WINDOW 64 /* upstream fixed replay window */
+#endif
 
 typedef struct End {
     xDtls *dtls;
@@ -307,7 +311,61 @@ static void packet_tests(void) {
     assert(!xt_packet_valid(&c, large, 1351, 1));
     puts("PASS IPv4 length/checksum validation and address authorization");
 }
+static void replay_window_tests(void) {
+    const unsigned distances[]={63,64,127,MBEDTLS_SSL_DTLS_REPLAY_WINDOW-1,
+                                MBEDTLS_SSL_DTLS_REPLAY_WINDOW,MBEDTLS_SSL_DTLS_REPLAY_WINDOW+65};
+    for (unsigned test=0;test<sizeof(distances)/sizeof(*distances);++test) {
+        End a,b; pair(&a,&b,0,0); assert(handshake(&a,&b));
+        unsigned char held[XDTLS_MAX_RECORD],out[2048];
+        a.hold=1; assert(xdtls_write(a.dtls,"old",3)==3);
+        size_t held_len=a.saved_len; memcpy(held,a.saved,held_len); a.hold=0;
+        for (unsigned i=0;i<distances[test];++i) {
+            assert(xdtls_write(a.dtls,"new",3)==3);
+            assert(xdtls_read(b.dtls,out,sizeof(out))==3);
+        }
+        assert(!xdtls_feed(b.dtls,held,held_len));
+        int expected=distances[test]<MBEDTLS_SSL_DTLS_REPLAY_WINDOW ? 3 : XDTLS_AGAIN;
+        assert(xdtls_read(b.dtls,out,sizeof(out))==expected);
+        assert(!xdtls_feed(b.dtls,held,held_len));
+        assert(xdtls_read(b.dtls,out,sizeof(out))==XDTLS_AGAIN); /* duplicate stays rejected */
+        destroy(&a,&b);
+    }
+    /* Compare boundary and random shifts with an independent receipt-history model. */
+    mbedtls_ssl_context ssl; mbedtls_ssl_config conf;
+    mbedtls_ssl_init(&ssl); mbedtls_ssl_config_init(&conf);
+    conf.MBEDTLS_PRIVATE(anti_replay)=MBEDTLS_SSL_ANTI_REPLAY_ENABLED;
+    ssl.MBEDTLS_PRIVATE(conf)=&conf;
+    unsigned char ctr[8]={0}; ssl.MBEDTLS_PRIVATE(in_ctr)=ctr;
+    unsigned char *seen=calloc(300000,1); assert(seen);
+    unsigned top=0,rng=7;
+    for (unsigned i=0;i<20000;++i) {
+        rng=rng*1664525u+1013904223u;
+        unsigned seq;
+        if (i%101==0) seq=top+MBEDTLS_SSL_DTLS_REPLAY_WINDOW+1;
+        else if (i%3==0) seq=top+1+rng%130;
+        else seq=top>MBEDTLS_SSL_DTLS_REPLAY_WINDOW+1 ? top-rng%(MBEDTLS_SSL_DTLS_REPLAY_WINDOW+2) : rng%(top+1);
+        /* Keep the oracle bounded while also exercising window reset. */
+        if (seq>=300000) {
+            mbedtls_ssl_dtls_replay_reset(&ssl); memset(seen,0,300000); top=seq=0;
+        }
+        for (unsigned j=0;j<6;++j) ctr[7-j]=(unsigned char)((uint64_t)seq>>(8*j));
+        int accept=(seq>top || top-seq<MBEDTLS_SSL_DTLS_REPLAY_WINDOW) && !seen[seq];
+        assert((mbedtls_ssl_dtls_replay_check(&ssl)==0)==accept);
+        if (accept) {
+            mbedtls_ssl_dtls_replay_update(&ssl); seen[seq]=1;
+            if (seq>top) top=seq;
+            assert(mbedtls_ssl_dtls_replay_check(&ssl)==-1);
+        }
+    }
+    free(seen);
+    /* Stack-owned pointers must not be passed to ssl_free. No setup allocated buffers. */
+    ssl.MBEDTLS_PRIVATE(in_ctr)=NULL; ssl.MBEDTLS_PRIVATE(conf)=NULL;
+    mbedtls_ssl_free(&ssl); mbedtls_ssl_config_free(&conf);
+    printf("PASS DTLS replay window=%u, encrypted reorder boundaries, duplicate rejection and history model\n",
+           MBEDTLS_SSL_DTLS_REPLAY_WINDOW);
+}
 int main(void) {
+    replay_window_tests();
     channel_tests();
     udp_test();
     duplex_backpressure_test();
