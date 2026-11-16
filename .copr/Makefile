@@ -7,8 +7,16 @@ spec ?= $(ROOT)/xtun.spec
 .PHONY: srpm
 srpm:
 	set -eu; \
-	command -v git >/dev/null && command -v rpmbuild >/dev/null && command -v curl >/dev/null; \
 	test -n "$(outdir)"; \
+	missing=""; \
+	for entry in git:git-core rpmbuild:rpm-build curl:curl-minimal tar:tar gzip:gzip; do \
+		tool=$${entry%%:*}; package=$${entry#*:}; \
+		if ! command -v "$$tool" >/dev/null 2>&1; then missing="$$missing $$package"; fi; \
+	done; \
+	if test -n "$$missing"; then \
+		command -v dnf >/dev/null 2>&1 || { echo "Missing SRPM tools; install:$$missing" >&2; exit 1; }; \
+		dnf -y install $$missing; \
+	fi; \
 	mkdir -p "$(outdir)"; \
 	work=$$(mktemp -d); \
 	trap 'rm -rf "$$work"' EXIT HUP INT TERM; \
