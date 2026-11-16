@@ -1,3 +1,12 @@
 [submodule "core"]
 	path = core
 	url = https://github.com/1dao/xnet2lua.git
+[submodule "3rd/wintun"]
+	path = 3rd/wintun
+	url = https://git.zx2c4.com/wintun
+[submodule "3rd/raylib"]
+	path = 3rd/raylib
+	url = https://github.com/raysan5/raylib.git
+[submodule "3rd/raygui"]
+	path = 3rd/raygui
+	url = https://github.com/raysan5/raygui.git
