@@ -119,7 +119,6 @@ static int read_fields(XtConfig *c, const char *tag) {
     c->local_networks[0] = (XtRoute){c->address, UINT32_MAX, 32}; c->local_count = 1;
     const char *routes = xt_cfg_value(tag, "routes");
     if ((c->full_tunnel && routes && *routes) ||
-        (!c->server && xt_cfg_value(tag, "local_networks")) ||
         !field_routes(tag, "routes", c->routes, &c->route_count, 0) ||
         !field_routes(tag, "local_networks", c->local_networks, &c->local_count, 1)) return 0;
     return c->full_tunnel ||

@@ -212,11 +212,21 @@ Start the server first, then the client, from an elevated/root terminal:
 After `READY`, ping the peer tunnel IP. In split mode, only configured routes
 are installed. Ctrl+C performs cleanup.
 
+For LAN-to-LAN access, for example `192.168.1.0/24` behind the client and
+`10.10.0.0/16` behind the server, set `full_tunnel=false`,
+`local_networks=192.168.1.0/24` and `routes=10.10.0.0/16` on the client;
+set `local_networks=10.10.0.0/16` and `routes=192.168.1.0/24` on the server.
+Enable OS IPv4 forwarding and permit firewall forwarding on both XTun machines.
+On each LAN gateway, route the opposite LAN through the local XTun machine's
+LAN IP. Use non-overlapping LAN and tunnel networks. These system settings
+are not installed by XTun. See `xtun --help` for paired configuration examples.
+
 - `routes`: networks reachable through the peer, also authorized remote packet
   sources. The peer tunnel address is automatically included as a /32.
-- `local_networks`: server-only authorization for additional networks behind
-  the server. It does **not** install routes, enable kernel forwarding, or
+- `local_networks`: authorization for additional networks behind either
+  peer. It does **not** install routes, enable kernel forwarding, or
   configure NAT. The local tunnel address is automatically included.
+
 - `name`: an unused interface name, at most 15 ASCII letters/digits/`_`/`-`.
 - `bind`, `bind_port`: outer UDP bind address/port. A server defaults to `port`;
   a client defaults to an ephemeral port.

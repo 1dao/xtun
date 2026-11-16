@@ -83,7 +83,7 @@ int xt_packet_valid(const XtConfig *c, const void *bytes, size_t n, int inbound)
     while (sum >> 16) sum = (sum & 65535) + (sum >> 16);
     if (sum != 65535) return 0;
     uint32_t src = be32(p+12), dst = be32(p+16);
-    /* Client is a host; server may route other IPv4 networks behind itself. */
+    /* Either peer may route the explicitly authorized networks behind itself. */
     uint32_t local = inbound ? dst : src;
     int local_allowed = 0;
     for (unsigned i = 0; i < c->local_count; ++i)

@@ -48,7 +48,10 @@ def main():
         check({"port":65536},False)
         check({"name":"bad;name"},False)
         check({"identity":""},False)
-        check({"local_networks":["198.19.0.0/24"]},False)
+        check({"local_networks":["198.19.0.0/24"]},True)
+        check({"full_tunnel":False,"local_networks":["192.168.1.0/24"],"routes":["10.10.0.0/16"]},True)
+        check({"full_tunnel":False,"local_networks":["192.168.1.1/24"]},False)
+        check({"full_tunnel":False,"local_networks":"192.168.1.0/24,"},False)
         check({"local_networks":["198.19.0.0/24"]},True,"server")
         check({"local_networks":["0.0.0.0/0"]},True,"server")
         windows = os.name == "nt"

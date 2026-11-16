@@ -25,8 +25,8 @@ def main():
     if os.geteuid() != 0:
         raise SystemExit("run as root (network namespaces are required)")
     tag = str(os.getpid())
-    namespaces = ["xtun-c-" + tag, "xtun-s-" + tag, "xtun-t-" + tag]
-    client, server, target = namespaces
+    namespaces = ["xtun-c-" + tag, "xtun-s-" + tag, "xtun-t-" + tag, "xtun-l-" + tag]
+    client, server, target, lan = namespaces
     created, processes, logs = [], [], []
     temp = tempfile.TemporaryDirectory(prefix="xtun-", dir=ROOT / "build")
     directory = Path(temp.name)
@@ -48,6 +48,7 @@ def main():
         for suffix, left, right, a, b in [
             ("a", client, server, "192.0.2.1/30", "192.0.2.2/30"),
             ("b", server, target, "198.19.0.1/24", "198.19.0.2/24"),
+            ("c", client, lan, "192.168.1.1/24", "192.168.1.2/24"),
         ]:
             first, second = "xc"+suffix+tag, "xs"+suffix+tag
             # Create directly inside a test namespace: no host link survives errors.
@@ -64,7 +65,8 @@ def main():
                        for key, value in values.items()]
             path.write_text("\n".join(entries)+"\n")
         server_settings = dict(address="10.77.0.1", peer_address="10.77.0.2",
-                               bind="192.0.2.2", port=PORT, name="xtun0", local_networks=["198.19.0.0/24"])
+                               bind="192.0.2.2", port=PORT, name="xtun0", local_networks=["198.19.0.0/24"],
+                               routes=["192.168.1.0/24"])
         config(directory/"server.cfg", **server_settings,
                PostUp="touch hook-marker; false; touch hook-unexpected", PostDown="rm -f hook-marker; touch hook-cleaned")
         failed, failed_log = spawn(server,[BIN,"server","--foreground"],"failed-hook.log")
@@ -75,8 +77,12 @@ def main():
         config(directory/"server.cfg", **server_settings,
                PostUp="nft -f hook.nft", PostDown="nft delete table ip xtun_test")
         config(directory/"client.cfg", address="10.77.0.2", peer_address="10.77.0.1",
-               bind="192.0.2.1", endpoint="192.0.2.2", port=PORT, name="xtun0", routes=["198.19.0.0/24"], mtu=1330)
+               bind="192.0.2.1", endpoint="192.0.2.2", port=PORT, name="xtun0", routes=["198.19.0.0/24"],
+               local_networks=["192.168.1.0/24"], mtu=1330)
         ns(server,"sysctl","-q","-w","net.ipv4.ip_forward=1")
+        ns(client,"sysctl","-q","-w","net.ipv4.ip_forward=1")
+        ns(lan,"ip","route","add","198.19.0.0/24","via","192.168.1.1")
+        ns(target,"ip","route","add","192.168.1.0/24","via","198.19.0.1")
         (directory/"hook.nft").write_text("table ip xtun_test {\nchain postrouting {\ntype nat hook postrouting priority srcnat;\nip saddr 10.77.0.2 ip daddr 198.19.0.0/24 masquerade\n}\n}\n")
         sp, sl = spawn(server,[BIN,"server","--foreground"],"server.log")
         cp, cl = spawn(client,[BIN,"client"],"client.log")
@@ -94,6 +100,9 @@ def main():
         print("PASS asymmetric MTU negotiation, both real TUN MTUs and maximum-size DF packet", flush=True)
         ns(client,"ping","-n","-c","3","-W","2","10.77.0.1")
         print("PASS tunnel-address ICMP",flush=True)
+        ns(lan,"ping","-n","-c","3","-W","2","198.19.0.2")
+        ns(target,"ping","-n","-c","3","-W","2","192.168.1.2")
+        print("PASS LAN-to-LAN ICMP initiated from both sides without NAT",flush=True)
         ns(client,"ping","-n","-c","3","-W","2","198.19.0.2")
         ns(client,"ping","-n","-c","1","-W","2","-s","3000","198.19.0.2")
         print("PASS isolated forwarding/NAT, including fragmented IPv4",flush=True)
@@ -153,7 +162,7 @@ u.close()
             ready_count = contents(sl).count("READY ")
             config(directory/"client.cfg", address="10.77.0.2", peer_address="10.77.0.1",
                    bind="192.0.2.1", endpoint="192.0.2.2", port=PORT, name="xtun0",
-                   routes=["198.19.0.0/24"], mtu=ceiling)
+                   routes=["198.19.0.0/24"], local_networks=["192.168.1.0/24"], mtu=ceiling)
             cp, cl = spawn(client,[BIN,"client"],f"client-mtu-{ceiling}.log")
             deadline = time.monotonic()+15
             while "READY " not in contents(cl) or contents(sl).count("READY ") <= ready_count:

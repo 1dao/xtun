@@ -309,6 +309,30 @@ static void packet_tests(void) {
     c.mtu = 1350;
     assert(xt_packet_valid(&c, large, 1350, 1));
     assert(!xt_packet_valid(&c, large, 1351, 1));
+    /* Routed LAN packets must pass both peers, in both directions, while
+       sources/destinations outside the explicitly allowed LANs stay blocked. */
+    XtConfig client = {0}, server = {0}; server.server = 1;
+    assert(xt_parse_route("192.168.1.0/24", &client.local_networks[0])); client.local_count = 1;
+    assert(xt_parse_route("10.10.0.0/16", &client.routes[0])); client.route_count = 1;
+    server.local_networks[0] = client.routes[0]; server.local_count = 1;
+    server.routes[0] = client.local_networks[0]; server.route_count = 1;
+    for (unsigned reverse = 0; reverse < 2; ++reverse) {
+        unsigned char lan[20] = {0x45,0,0,20,0,0,0,0,64,17};
+        const unsigned char local[4] = {192,168,1,10}, remote[4] = {10,10,0,20};
+        memcpy(lan+12, reverse ? remote : local, 4);
+        memcpy(lan+16, reverse ? local : remote, 4);
+        sum = 0; for (unsigned i=0;i<20;i+=2) sum += (unsigned)lan[i]*256+lan[i+1];
+        while (sum>>16) sum=(sum&65535)+(sum>>16);
+        sum=~sum; lan[10]=sum>>8; lan[11]=sum;
+        assert(xt_packet_valid(&client,lan,sizeof(lan),reverse));
+        assert(xt_packet_valid(&server,lan,sizeof(lan),!reverse));
+        client.local_count = 0;
+        assert(!xt_packet_valid(&client,lan,sizeof(lan),reverse));
+        client.local_count = 1;
+        server.route_count = 0;
+        assert(!xt_packet_valid(&server,lan,sizeof(lan),!reverse));
+        server.route_count = 1;
+    }
     puts("PASS IPv4 length/checksum validation and address authorization");
 }
 static void replay_window_tests(void) {
