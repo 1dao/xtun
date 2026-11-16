@@ -26,6 +26,13 @@ The UDP address API currently accepts numeric IPv4 addresses only.
 
 ## Build
 
+Make defaults to 8 parallel jobs; use `make -jN` to override. `build.bat`
+also defaults to 8 compiler workers; use `build.bat -jN` to override.
+Both builds clear their disposable build directory after all requested targets
+succeed, including old logs and temporary test files. Store files you want to
+keep outside `build/`. Failed builds retain intermediates for diagnosis. Final
+programs, debug symbols and distribution files in `bin/` are retained.
+
 ```sh
 git clone --recursive https://github.com/1dao/xtun.git
 cd xtun
@@ -34,6 +41,25 @@ make test
 ```
 
 On Windows use MinGW-w64 GCC and `mingw32-make`. On Linux use GCC and GNU Make.
+Alternatively, on Windows with Visual Studio C++ x64 Build Tools installed:
+
+```bat
+build.bat
+build.bat gui
+build.bat console
+build.bat test
+build.bat debug test
+```
+
+By default this builds both the console program and the self-contained GUI.
+`gui` or `console` selects one, and `test` builds both and runs the C tests.
+This uses MSVC, compiling core, mbedTLS and the GUI libraries
+from source and statically linking the C runtime (`/MT`, or `/MTd` in debug).
+The release executable needs no Visual C++ runtime installation. Intermediate
+files go under `build/msvc/`; outputs are `bin/xtun.exe` and `bin/xtun-gui.exe`.
+The GUI can also use the MinGW build described below. Windows system DLLs and the signed `wintun.dll`
+are still required.
+
 The CFG reader and mbedTLS are compiled from `core/`; no Lua runtime or
 system TLS library is needed. The output is `bin/xtun.exe` or `bin/xtun`.
 The DTLS wrapper is owned by XTun in `src/xdtls.c` and `src/xdtls.h`;
@@ -53,16 +79,27 @@ It does not install a driver or create an adapter.
 ## Windows desktop client
 
 The optional desktop client is written in C with raylib and raygui. Build it
-with MinGW-w64 and a Windows x64 static raylib library:
+with MinGW-w64 using the raylib and raygui submodules:
 
 ```powershell
-mingw32-make gui RAYLIB_ROOT=C:/source/ops/raylib RAYGUI_ROOT=C:/source/ops/raygui
+git submodule update --init --recursive
+mingw32-make -j8 gui
 ```
 
-The default dependency paths point to sibling checkouts under `../../ops`.
-`RAYLIB_STATIC` can override the library path. Keep `xtun-gui.exe`,
-`xtun.exe`, `wintun.dll` and the third-party notices together when distributing
-the build. The GUI needs no Lua script or raygui DLL at runtime.
+The default dependency paths are `3rd/raylib` and `3rd/raygui`. The build
+automatically compiles a static raylib library when it is missing. Windows
+executables use static compiler runtime linking (`-static`). `RAYLIB_ROOT`,
+`RAYGUI_ROOT` and `RAYLIB_STATIC` can override the dependency paths. Keep
+`xtun-gui.exe`, `wintun.dll` and the third-party notices together when distributing
+the GUI. The tunnel engine, core networking and mbedTLS are linked directly into
+`xtun-gui.exe`; it does not require `xtun.exe`. Connections run in a hidden copy
+of the GUI executable, preserving pipe-based logging, graceful shutdown and
+cleanup when the parent exits. No additional window is opened for the worker.
+The GUI needs no Lua script or raygui DLL at runtime.
+
+`make` still builds the separate console program (`xtun.exe` on Windows,
+`xtun` on Linux). Use `mingw32-make all gui` to build both Windows programs.
+macOS tunnel support is not implemented.
 
 From the directory where you keep `client.cfg`, launch `xtun-gui.exe` as
 administrator. For example, run this from the project root in PowerShell:

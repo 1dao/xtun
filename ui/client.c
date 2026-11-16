@@ -417,7 +417,11 @@ static void start_profile(int index) {
         failed = index;
     }
 }
+/* src/main.c is compiled a second time with its entry point renamed. */
+int xt_cli_main(int argc, char **argv);
 int main(int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[1], "--tunnel-worker"))
+        return xt_cli_main(argc - 1, argv + 1);
     int smoke = argc == 2 && !strcmp(argv[1], "--smoke");
     int boot = argc > 1 && !strcmp(argv[1], "--autostart");
     int directory_ok = !boot || ui_autorun_workdir();

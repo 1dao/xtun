@@ -78,14 +78,13 @@ int ui_check_config(const char *path, const char *tag) {
 int ui_start(const char *tag, unsigned long *error) {
     char exe[MAX_PATH], command[MAX_PATH + 96];
     DWORD n = GetModuleFileNameA(NULL, exe, MAX_PATH);
-    char *slash = n && n < MAX_PATH ? strrchr(exe, '\\') : NULL;
-    if (child || !xt_tag_valid(tag) || !slash ||
-        (size_t)(slash-exe) + sizeof("\\xtun.exe") > MAX_PATH) {
+    if (child || !xt_tag_valid(tag) || !n || n >= MAX_PATH) {
         *error = ERROR_INVALID_PARAMETER;
         return 0;
     }
-    strcpy(slash + 1, "xtun.exe");
-    snprintf(command, sizeof(command), "\"%s\" client --tag %s --gui-child", exe, tag);
+    /* The GUI embeds the same entry point as the standalone console program.
+     * Keep pipe-based shutdown/logging and run it in a hidden copy of ourselves. */
+    snprintf(command, sizeof(command), "\"%s\" --tunnel-worker client --tag %s --gui-child", exe, tag);
     SECURITY_ATTRIBUTES inherit = {sizeof(inherit), NULL, TRUE};
     HANDLE input = NULL, writer = NULL;
     STARTUPINFOA startup = {0};

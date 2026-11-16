@@ -6,12 +6,13 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = Path(os.environ.get("XTUN_BIN", str(ROOT/"bin"/("xtun.exe" if os.name=="nt" else "xtun")))).resolve()
+COMMAND = [str(BIN)] + (["--tunnel-worker"] if BIN.name.lower() == "xtun-gui.exe" else [])
 
 def main():
     with tempfile.TemporaryDirectory(dir=ROOT/"build",prefix="config-") as folder:
         folder=Path(folder)
         key=folder/"peer.key"
-        def call(*args):return subprocess.run([str(BIN),*map(str,args)],cwd=folder,text=True,capture_output=True)
+        def call(*args):return subprocess.run([*COMMAND,*map(str,args)],cwd=folder,text=True,capture_output=True,timeout=10)
         assert call("keygen",key).returncode==0
         original=key.read_bytes()
         assert len(original)==64

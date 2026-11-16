@@ -11,6 +11,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = Path(os.environ.get("XTUN_BIN", str(ROOT / "bin" / ("xtun.exe" if os.name == "nt" else "xtun")))).resolve()
+COMMAND = [str(BIN)] + (["--tunnel-worker"] if BIN.name.lower() == "xtun-gui.exe" else [])
 
 
 def main():
@@ -52,13 +53,13 @@ def main():
             client_port = relay.getsockname()[1] if loss else port
             (folder / "client.cfg").write_text(common + f"port={client_port}\nendpoint=127.0.0.1\naddress=10.77.0.2\npeer_address=10.77.0.1\nmtu={client_limit}\n" + client_setting)
             with open(folder / "server.log", "w+") as log:
-                server = subprocess.Popen([str(BIN), "server", "--probe"], cwd=folder, stdout=log, stderr=subprocess.STDOUT)
+                server = subprocess.Popen([*COMMAND, "server", "--probe"], cwd=folder, stdout=log, stderr=subprocess.STDOUT)
                 try:
                     deadline = time.monotonic() + 4
                     while "LISTEN " not in (folder / "server.log").read_text():
                         assert server.poll() is None and time.monotonic() < deadline
                         time.sleep(.01)
-                    client = subprocess.run([str(BIN), "client", "--probe"], cwd=folder, capture_output=True, text=True, timeout=10)
+                    client = subprocess.run([*COMMAND, "client", "--probe"], cwd=folder, capture_output=True, text=True, timeout=10)
                     assert client.returncode == 0, client.stdout + client.stderr
                     deadline = time.monotonic() + 2
                     while "READY " not in (folder / "server.log").read_text():
