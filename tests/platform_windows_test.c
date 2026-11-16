@@ -33,6 +33,28 @@ static void released(Source *s, LONG target) {
     assert(s->released == target);
 }
 int main(void) {
+    /* Load the real embedded DLL without creating an adapter or installing a
+     * driver. No adjacent DLL is consulted; the extracted bytes stay locked. */
+    for (unsigned attempt = 0; attempt < 2; ++attempt) {
+        XtDevice *embedded = calloc(1, sizeof(*embedded)); assert(embedded);
+        embedded->wake[0] = embedded->wake[1] = INVALID_SOCKET_VAL;
+        InitializeCriticalSection(&embedded->lock);
+        assert(load_wintun(embedded));
+        WCHAR extracted[2048], directory[2048], loaded[2048];
+        wcscpy(extracted, embedded->dll_path); wcscpy(directory, extracted);
+        *wcsrchr(directory, L'\\') = 0;
+        assert(GetModuleFileNameW(embedded->dll, loaded, 2048));
+        assert(!wcscmp(extracted, loaded));
+        assert(GetProcAddress(embedded->dll, "WintunCreateAdapter"));
+        HANDLE writer = CreateFileW(extracted, GENERIC_WRITE, FILE_SHARE_READ,
+            NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        assert(writer == INVALID_HANDLE_VALUE);
+        assert(!DeleteFileW(extracted));
+        xt_device_close(embedded);
+        assert(GetFileAttributesW(extracted) == INVALID_FILE_ATTRIBUTES);
+        assert(GetFileAttributesW(directory) == INVALID_FILE_ATTRIBUTES);
+    }
+    puts("PASS embedded signed Wintun extraction, loading, replacement protection and cleanup");
     assert(!socket_init()); assert(!xpoll_init());
     Source s = {0}; s.ready = CreateEventW(NULL, FALSE, FALSE, NULL); assert(s.ready);
     XtDevice *d = calloc(1, sizeof(*d)); assert(d);

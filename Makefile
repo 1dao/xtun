@@ -42,9 +42,16 @@ TEST_APP_OBJS := $(filter-out $(BUILD)/app/main.o,$(APP_OBJS))
 all: $(BIN_DIR)/xtun$(EXT)
 ifeq ($(OS),Windows_NT)
 PLATFORM_TEST = $(BIN_DIR)/platform_windows_test.exe
-$(BIN_DIR)/platform_windows_test.exe: tests/platform_windows_test.c src/platform.c src/xtun.h $(CORE_OBJS)
+WINTUN_RESOURCE = $(BUILD)/ui/wintun.o
+.PHONY: prepare-wintun
+prepare-wintun:
+	powershell -NoProfile -ExecutionPolicy Bypass -File tools/get_wintun.ps1
+$(WINTUN_RESOURCE): src/wintun.rc prepare-wintun
+	@mkdir -p $(BUILD)/ui
+	"$(WINDRES)" -J rc -O coff -I3rd/dll -i src/wintun.rc -o $@
+$(BIN_DIR)/platform_windows_test.exe: tests/platform_windows_test.c src/platform.c src/xtun.h $(CORE_OBJS) $(WINTUN_RESOURCE)
 	@mkdir -p $(BIN_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $< $(CORE_OBJS) $(LDLIBS) -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $< $(CORE_OBJS) $(WINTUN_RESOURCE) $(LDLIBS) -o $@
 endif
 test: $(BIN_DIR)/dtls_test$(EXT) $(BIN_DIR)/arq_test$(EXT) $(PLATFORM_TEST)
 	./$(BIN_DIR)/dtls_test$(EXT)
@@ -69,9 +76,9 @@ $(BIN_DIR)/dtls_test$(EXT): tests/dtls_test.c src/xtun.h $(TEST_APP_OBJS) $(CORE
 $(BIN_DIR)/arq_test$(EXT): tests/arq_test.c src/tunnel.c src/xtun.h $(TEST_APP_OBJS) $(CORE_OBJS) $(BUILD)/mbedtls.a
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $< $(filter-out $(BUILD)/app/tunnel.o,$(TEST_APP_OBJS)) $(CORE_OBJS) $(BUILD)/mbedtls.a $(LDLIBS) -o $@
-$(BIN_DIR)/xtun$(EXT): $(APP_OBJS) $(CORE_OBJS) $(BUILD)/mbedtls.a
+$(BIN_DIR)/xtun$(EXT): $(APP_OBJS) $(CORE_OBJS) $(BUILD)/mbedtls.a $(WINTUN_RESOURCE)
 	@mkdir -p $(BIN_DIR)
-	$(CC) $(CFLAGS) $(LDFLAGS) $(APP_OBJS) $(CORE_OBJS) $(BUILD)/mbedtls.a $(LDLIBS) -o $@
+	$(CC) $(CFLAGS) $(LDFLAGS) $(APP_OBJS) $(CORE_OBJS) $(BUILD)/mbedtls.a $(WINTUN_RESOURCE) $(LDLIBS) -o $@
 -include $(wildcard $(BUILD)/core/*.d $(BUILD)/app/*.d $(BUILD)/mbed/*.d $(BUILD)/ui/*.d)
 ifeq ($(OS),Windows_NT)
 RAYLIB_ROOT ?= 3rd/raylib
@@ -89,9 +96,9 @@ $(BUILD)/ui/xtun-main.o: src/main.c src/config.h src/xtun.h
 	@mkdir -p $(BUILD)/ui
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Dmain=xt_cli_main -c $< -o $@
 gui: $(BIN_DIR)/xtun-gui.exe $(BIN_DIR)/raygui-notices.txt
-$(BIN_DIR)/xtun-gui.exe: ui/client.c ui/process.c ui/process.h ui/tray.c ui/tray.h ui/client_config.c ui/client_config.h src/config.h $(TEST_APP_OBJS) $(CORE_OBJS) $(BUILD)/mbedtls.a $(BUILD)/ui/xtun-main.o $(BUILD)/ui/xtun-icon.o $(RAYLIB_STATIC) $(RAYGUI_ROOT)/src/raygui.h Makefile
+$(BIN_DIR)/xtun-gui.exe: ui/client.c ui/process.c ui/process.h ui/tray.c ui/tray.h ui/client_config.c ui/client_config.h src/config.h $(TEST_APP_OBJS) $(CORE_OBJS) $(BUILD)/mbedtls.a $(WINTUN_RESOURCE) $(BUILD)/ui/xtun-main.o $(BUILD)/ui/xtun-icon.o $(RAYLIB_STATIC) $(RAYGUI_ROOT)/src/raygui.h Makefile
 	@mkdir -p $(BIN_DIR)
-	$(CC) $(CPPFLAGS) $(filter-out -MMD -MP,$(CFLAGS)) $(LDFLAGS) -isystem "$(RAYLIB_ROOT)/src" -isystem "$(RAYGUI_ROOT)/src" -mwindows ui/client.c ui/process.c ui/tray.c ui/client_config.c $(BUILD)/ui/xtun-main.o $(TEST_APP_OBJS) $(CORE_OBJS) $(BUILD)/mbedtls.a $(BUILD)/ui/xtun-icon.o "$(RAYLIB_STATIC)" -lopengl32 -lgdi32 -lshell32 $(LDLIBS) -o $@
+	$(CC) $(CPPFLAGS) $(filter-out -MMD -MP,$(CFLAGS)) $(LDFLAGS) -isystem "$(RAYLIB_ROOT)/src" -isystem "$(RAYGUI_ROOT)/src" -mwindows ui/client.c ui/process.c ui/tray.c ui/client_config.c $(BUILD)/ui/xtun-main.o $(TEST_APP_OBJS) $(CORE_OBJS) $(BUILD)/mbedtls.a $(WINTUN_RESOURCE) $(BUILD)/ui/xtun-icon.o "$(RAYLIB_STATIC)" -lopengl32 -lgdi32 -lshell32 $(LDLIBS) -o $@
 $(BIN_DIR)/raygui-notices.txt: $(wildcard ui/vendor/*LICENSE.txt)
 	@mkdir -p $(BIN_DIR)
 	cat $^ > $@

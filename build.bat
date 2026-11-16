@@ -29,7 +29,7 @@ if %JOBS% GTR 65536 goto invalid_jobs
 echo [INFO] Parallel compile jobs=%JOBS%
 
 REM Like core/build.bat, compile all dependencies from source with MSVC.
-REM /MT also embeds the C runtime; Wintun remains a separate signed DLL.
+REM /MT embeds the C runtime; the signed Wintun DLL is embedded as a resource.
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 if not exist "%VSWHERE%" set "VSWHERE=%ProgramFiles%\Microsoft Visual Studio\Installer\vswhere.exe"
 if /I not "%VSCMD_ARG_TGT_ARCH%"=="x64" (
@@ -50,6 +50,10 @@ if /I not "%VSCMD_ARG_TGT_ARCH%"=="x64" (
 set "OBJ=build\msvc\%MODE%"
 if not exist "%OBJ%" mkdir "%OBJ%"
 if not exist bin mkdir bin
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\get_wintun.ps1
+if errorlevel 1 exit /b 1
+rc /nologo /I3rd\dll /fo "%OBJ%\wintun.res" src\wintun.rc
+if errorlevel 1 exit /b 1
 set "FLAGS=/nologo /TC /W3 /utf-8 /std:c11 /experimental:c11atomics /DWIN32_LEAN_AND_MEAN /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /D_CRT_SECURE_NO_WARNINGS /DXNET_WITH_UDP=1 /DXMACRO_USE_RPMALLOC=0 /Icore /Icore\3rd\mbedtls3\include /Isrc"
 set "LINKFLAGS=/nologo /INCREMENTAL:NO"
 set "FLAGS=%FLAGS% /MP%JOBS% /FS"
@@ -87,7 +91,7 @@ if errorlevel 1 exit /b 1
 call :compile src\main.c "%OBJ%\main.obj"
 if errorlevel 1 exit /b 1
 if not "%TARGET%"=="gui" (
-    link %LINKFLAGS% /OUT:bin\xtun.exe %OBJ%\main.obj %APP_OBJS% %CORE_OBJS% %MBED_OBJS% %LIBS%
+    link %LINKFLAGS% /OUT:bin\xtun.exe %OBJ%\main.obj %APP_OBJS% %CORE_OBJS% %MBED_OBJS% %OBJ%\wintun.res %LIBS%
     if errorlevel 1 exit /b 1
 )
 if not "%TARGET%"=="console" (
@@ -118,7 +122,7 @@ if not "%TARGET%"=="console" (
     set "FLAGS=!SAVED_FLAGS!"
     rc /nologo /Iui /fo "%OBJ%\xtun.res" ui\xtun.rc
     if errorlevel 1 exit /b 1
-    link %LINKFLAGS% /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup /OUT:bin\xtun-gui.exe !UI_OBJS! %OBJ%\ui_main.obj %APP_OBJS% %CORE_OBJS% %MBED_OBJS% !RAY_OBJS! %OBJ%\xtun.res %LIBS% opengl32.lib gdi32.lib shell32.lib user32.lib
+    link %LINKFLAGS% /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup /OUT:bin\xtun-gui.exe !UI_OBJS! %OBJ%\ui_main.obj %APP_OBJS% %CORE_OBJS% %MBED_OBJS% !RAY_OBJS! %OBJ%\xtun.res %OBJ%\wintun.res %LIBS% opengl32.lib gdi32.lib shell32.lib user32.lib
     if errorlevel 1 exit /b 1
     type ui\vendor\*LICENSE.txt > bin\raygui-notices.txt
     if errorlevel 1 exit /b 1
@@ -133,7 +137,7 @@ if "%TARGET%"=="test" (
         set "TEST_OBJS=!APP_OBJS!"
         if "%%T"=="arq" set "TEST_OBJS=%OBJ%\app\config.obj %OBJ%\app\platform.obj %OBJ%\app\xdtls.obj"
         if "%%T"=="platform_windows" set "TEST_OBJS="
-        link %LINKFLAGS% /OUT:bin\%%T_test.exe %OBJ%\%%T_test.obj !TEST_OBJS! %CORE_OBJS% %MBED_OBJS% %LIBS%
+        link %LINKFLAGS% /OUT:bin\%%T_test.exe %OBJ%\%%T_test.obj !TEST_OBJS! %CORE_OBJS% %MBED_OBJS% %OBJ%\wintun.res %LIBS%
         if errorlevel 1 exit /b 1
         bin\%%T_test.exe
         if errorlevel 1 exit /b 1

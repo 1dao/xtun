@@ -57,8 +57,8 @@ This uses MSVC, compiling core, mbedTLS and the GUI libraries
 from source and statically linking the C runtime (`/MT`, or `/MTd` in debug).
 The release executable needs no Visual C++ runtime installation. Intermediate
 files go under `build/msvc/`; outputs are `bin/xtun.exe` and `bin/xtun-gui.exe`.
-The GUI can also use the MinGW build described below. Windows system DLLs and the signed `wintun.dll`
-are still required.
+The GUI can also use the MinGW build described below. Windows system DLLs
+are still required; the signed Wintun DLL is embedded in both executables.
 
 The CFG reader and mbedTLS are compiled from `core/`; no Lua runtime or
 system TLS library is needed. The output is `bin/xtun.exe` or `bin/xtun`.
@@ -68,13 +68,22 @@ The DTLS wrapper is owned by XTun in `src/xdtls.c` and `src/xdtls.h`;
 Windows and Linux object directories are separate, allowing WSL and Windows
 builds in the same checkout.
 
-For Windows, put the official, signed x64 `wintun.dll` beside `xtun.exe`.
-Obtain it from [Wintun](https://www.wintun.net/) and retain its distribution
-license. The driver binary is not committed to this repository. XTun loads
-only the DLL adjacent to its executable, not one from the working directory.
-`pwsh -File tools/get_wintun.ps1` downloads version 0.14.1, checks the pinned
-archive SHA-256 and Windows signature, and copies the x64 DLL and license.
-It does not install a driver or create an adapter.
+Windows builds automatically obtain the official signed x64 Wintun 0.14.1 DLL
+using `tools/get_wintun.ps1`, verifying the pinned archive/DLL SHA-256 and
+Authenticode signature. The official prebuilt DLL and license are stored in
+`3rd/dll/` and embedded as resources in both executables. The DLL is ignored
+by Git; the download script and distribution license are committed with the
+project. Network access is only needed if the prebuilt files are missing.
+The build also copies the distribution license to `bin/wintun-LICENSE.txt`.
+
+You do not need to ship a separate `wintun.dll`. When opening a tunnel, XTun
+extracts its embedded DLL into a fresh `xtun-wintun-*` directory under the
+Windows temporary directory and loads it by absolute path. It does not load
+an adjacent or working-directory DLL. The extracted file is checked against
+the embedded bytes and locked against replacement until unloading. Normal
+shutdown removes the DLL and directory; a crash may leave temporary files.
+Administrator access is still required to create the adapter. Retain the
+Wintun distribution license (`bin/wintun-LICENSE.txt`) when distributing XTun.
 
 ## Windows desktop client
 
@@ -90,7 +99,7 @@ The default dependency paths are `3rd/raylib` and `3rd/raygui`. The build
 automatically compiles a static raylib library when it is missing. Windows
 executables use static compiler runtime linking (`-static`). `RAYLIB_ROOT`,
 `RAYGUI_ROOT` and `RAYLIB_STATIC` can override the dependency paths. Keep
-`xtun-gui.exe`, `wintun.dll` and the third-party notices together when distributing
+`xtun-gui.exe` and the third-party notices together when distributing
 the GUI. The tunnel engine, core networking and mbedTLS are linked directly into
 `xtun-gui.exe`; it does not require `xtun.exe`. Connections run in a hidden copy
 of the GUI executable, preserving pipe-based logging, graceful shutdown and

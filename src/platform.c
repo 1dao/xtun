@@ -12,6 +12,8 @@
 
 struct XtDevice {
     HMODULE dll;
+    HANDLE dll_file, dll_directory;
+    WCHAR dll_path[2048];
     void *adapter, *session;
     void *(WINAPI *CreateAdapter)(LPCWSTR, LPCWSTR, const GUID *);
     void (WINAPI *CloseAdapter)(void *);
@@ -118,19 +120,56 @@ static DWORD WINAPI reader(void *p) {
     }
     return 0;
 }
+/* Extract the exact signed resource into a fresh directory. Keep both the
+ * file and directory locked against replacement until the DLL is unloaded. */
+static int load_wintun(XtDevice *d) {
+    HRSRC resource = FindResourceW(NULL, L"XTUN_WINTUN", MAKEINTRESOURCEW(10));
+    if (!resource) return 0;
+    DWORD size = SizeofResource(NULL, resource);
+    const void *bytes = LockResource(LoadResource(NULL, resource));
+    if (!size || !bytes) return 0;
+    WCHAR temp[2048]; unsigned char random[16];
+    DWORD n = GetTempPathW(2048, temp);
+    if (!n || n > 1950 || !xt_random(random, sizeof(random))) return 0;
+    wcscpy(d->dll_path, temp);
+    wcscat(d->dll_path, L"xtun-wintun-");
+    for (unsigned i = 0; i < sizeof(random); ++i)
+        swprintf(d->dll_path + n + 12 + i*2, 3, L"%02x", random[i]);
+    /* The random directory name avoids collisions between GUI workers. */
+    if (!CreateDirectoryW(d->dll_path, NULL)) { d->dll_path[0] = 0; return 0; }
+    d->dll_directory = CreateFileW(d->dll_path, GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (d->dll_directory == INVALID_HANDLE_VALUE) { d->dll_directory = NULL; return 0; }
+    wcscat(d->dll_path, L"\\wintun.dll");
+    d->dll_file = CreateFileW(d->dll_path, GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (d->dll_file == INVALID_HANDLE_VALUE) { d->dll_file = NULL; return 0; }
+    DWORD written;
+    if (!WriteFile(d->dll_file, bytes, size, &written, NULL) || written != size ||
+        !FlushFileBuffers(d->dll_file)) return 0;
+    CloseHandle(d->dll_file);
+    d->dll_file = CreateFileW(d->dll_path, GENERIC_READ, FILE_SHARE_READ,
+        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (d->dll_file == INVALID_HANDLE_VALUE) { d->dll_file = NULL; return 0; }
+    LARGE_INTEGER actual;
+    if (!GetFileSizeEx(d->dll_file, &actual) || actual.QuadPart != size) return 0;
+    for (DWORD at = 0; at < size;) {
+        unsigned char chunk[4096]; DWORD got, want = size-at;
+        if (want > sizeof(chunk)) want = sizeof(chunk);
+        if (!ReadFile(d->dll_file, chunk, want, &got, NULL) || got != want ||
+            memcmp(chunk, (const unsigned char *)bytes+at, want)) return 0;
+        at += want;
+    }
+    d->dll = LoadLibraryExW(d->dll_path, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    return d->dll != NULL;
+}
 XtDevice *xt_device_open(const XtConfig *c, char error[256]) {
     XtDevice *d = calloc(1, sizeof(*d));
     if (!d) return NULL;
     d->wake[0] = d->wake[1] = INVALID_SOCKET_VAL;
     InitializeCriticalSection(&d->lock);
-    WCHAR path[2048], name[32];
-    DWORD length = GetModuleFileNameW(NULL, path, 2048);
-    if (!length || length >= 2048) goto bad;
-    WCHAR *slash = wcsrchr(path, L'\\');
-    if (!slash || slash-path > 2000) goto bad;
-    wcscpy(slash+1, L"wintun.dll");
-    d->dll = LoadLibraryExW(path, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (!d->dll) goto bad;
+    WCHAR name[32];
+    if (!load_wintun(d)) goto bad;
 #define LOAD(name) do { FARPROC proc = GetProcAddress(d->dll, "Wintun" #name); memcpy(&d->name, &proc, sizeof(proc)); if (!d->name) goto bad; } while (0)
     LOAD(CreateAdapter); LOAD(CloseAdapter); LOAD(GetAdapterLUID); LOAD(StartSession); LOAD(EndSession);
     LOAD(GetReadWaitEvent); LOAD(ReceivePacket); LOAD(ReleaseReceivePacket); LOAD(AllocateSendPacket); LOAD(SendPacket);
@@ -167,7 +206,7 @@ XtDevice *xt_device_open(const XtConfig *c, char error[256]) {
     if (!d->thread) goto bad;
     return d;
 bad:
-    snprintf(error, 256, "Windows error %lu (administrator access and adjacent signed wintun.dll required)", GetLastError());
+    snprintf(error, 256, "Windows error %lu (embedded Wintun extraction/loading and administrator access required)", GetLastError());
     xt_device_close(d); return NULL;
 }
 static DWORD add_route(XtDevice *d, NET_LUID luid, uint32_t network, UINT8 prefix,
@@ -341,6 +380,15 @@ void xt_device_close(XtDevice *d) {
     if (d->session) d->EndSession(d->session);
     if (d->adapter) d->CloseAdapter(d->adapter);
     if (d->dll) FreeLibrary(d->dll);
+    if (d->dll_file) CloseHandle(d->dll_file);
+    if (d->dll_path[0]) {
+        WCHAR *slash = wcsrchr(d->dll_path, L'\\');
+        if (slash && !wcscmp(slash+1, L"wintun.dll")) {
+            DeleteFileW(d->dll_path); *slash = 0;
+        }
+        if (d->dll_directory) CloseHandle(d->dll_directory);
+        RemoveDirectoryW(d->dll_path);
+    }
     DeleteCriticalSection(&d->lock); free(d);
 }
 #else
