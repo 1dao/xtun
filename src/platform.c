@@ -397,7 +397,7 @@ void xt_device_close(XtDevice *d) {
 #include <errno.h>
 #include <time.h>
 #include <sys/ioctl.h>
-#include <sys/random.h>
+#include <sys/syscall.h>
 #include <sys/stat.h>
 #include <net/if.h>
 #include <linux/if_tun.h>
@@ -411,8 +411,35 @@ void xt_time_begin(void) { }
 void xt_time_end(void) { }
 int xt_random(void *out, size_t n) {
     size_t at = 0;
-    while (at < n) { ssize_t got = getrandom((char *)out+at, n-at, 0); if (got < 0 && errno == EINTR) continue; if (got <= 0) return 0; at += (size_t)got; }
-    return 1;
+#ifdef SYS_getrandom
+    /* Use the kernel API directly: older glibc has no getrandom wrapper or
+       sys/random.h even on kernels that implement the system call. */
+    while (at < n) {
+        size_t chunk = n-at < 256 ? n-at : 256;
+        ssize_t got = syscall(SYS_getrandom, (char *)out+at, chunk, 0);
+        if (got < 0 && errno == EINTR) continue;
+        if (got < 0 && errno == ENOSYS) break;
+        if (got <= 0) return 0;
+        at += (size_t)got;
+    }
+#endif
+    if (at == n) return 1;
+    /* Pre-getrandom kernels: use the blocking kernel entropy device rather
+       than risk uninitialized /dev/urandom output during early boot. This
+       path is used for key generation, so waiting for entropy is intentional. */
+    int fd;
+    do { fd = open("/dev/random", O_RDONLY|O_CLOEXEC); } while (fd < 0 && errno == EINTR);
+    if (fd < 0) return 0;
+    int ok = 1;
+    while (at < n) {
+        size_t chunk = n-at < 256 ? n-at : 256;
+        ssize_t got = read(fd, (char *)out+at, chunk);
+        if (got < 0 && errno == EINTR) continue;
+        if (got <= 0) { ok = 0; break; }
+        at += (size_t)got;
+    }
+    if (close(fd)) ok = 0;
+    return ok;
 }
 int xt_key_write(const char *path, const void *data, size_t n) {
     int f = open(path, O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC, 0600);

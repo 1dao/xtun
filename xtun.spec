@@ -10,7 +10,7 @@ URL:            https://github.com/1dao/xtun
 Source0:        xtun-%{version}.tar.gz
 Source1:        https://raw.githubusercontent.com/Mbed-TLS/mbedtls/mbedtls-3.6.5/LICENSE
 
-ExclusiveArch:  x86_64
+ExclusiveArch:  x86_64 x86_64_v2
 BuildRequires:  gcc
 BuildRequires:  make
 Provides:       bundled(mbedtls) = 3.6.5
