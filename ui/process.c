@@ -8,36 +8,112 @@
 
 static HANDLE child, control, output;
 
-/* Preserve the configuration directory: XTun resolves client.cfg from cwd. */
+/* The GUI requires elevation, so Explorer's Run key cannot launch it.
+ * Use an interactive, highest-privilege logon task instead. Keep the same
+ * task name across upgrades so moving the executable updates its action. */
+#define AUTORUN_TASK L"XTun GUI"
 #define RUN_KEY L"Software\\Microsoft\\Windows\\CurrentVersion\\Run"
 #define RUN_VALUE L"xtun-gui"
+
+/* EncodedCommand avoids command-line quoting/injection for Unicode paths.
+ * No shell window or script file is needed. The GUI is already elevated. */
+static int autorun_script(const wchar_t *script) {
+    static const wchar_t alphabet[] =
+        L"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    wchar_t exe[MAX_PATH], command[16384];
+    UINT n = GetSystemDirectoryW(exe, MAX_PATH);
+    if (!n || n + 48 >= MAX_PATH) return 0;
+    wcscat(exe, L"\\WindowsPowerShell\\v1.0\\powershell.exe");
+    int prefix = swprintf(command, sizeof(command)/sizeof(*command),
+                         L"\"%ls\" -NoLogo -NoProfile -NonInteractive -EncodedCommand ", exe);
+    size_t bytes = wcslen(script) * sizeof(wchar_t);
+    size_t encoded = ((bytes + 2) / 3) * 4;
+    if (prefix < 0 || prefix + encoded + 1 > sizeof(command)/sizeof(*command)) return 0;
+    const unsigned char *data = (const unsigned char *)script;
+    wchar_t *out = command + prefix;
+    for (size_t i = 0; i < bytes; i += 3) {
+        unsigned v = (unsigned)data[i] << 16;
+        if (i + 1 < bytes) v |= (unsigned)data[i + 1] << 8;
+        if (i + 2 < bytes) v |= data[i + 2];
+        *out++ = alphabet[(v >> 18) & 63];
+        *out++ = alphabet[(v >> 12) & 63];
+        *out++ = i + 1 < bytes ? alphabet[(v >> 6) & 63] : L'=';
+        *out++ = i + 2 < bytes ? alphabet[v & 63] : L'=';
+    }
+    *out = 0;
+    STARTUPINFOW startup = {sizeof(startup)};
+    PROCESS_INFORMATION process;
+    if (!CreateProcessW(exe, command, NULL, NULL, FALSE, CREATE_NO_WINDOW,
+                        NULL, NULL, &startup, &process)) return 0;
+    CloseHandle(process.hThread);
+    DWORD code = 1;
+    /* Wait for completion: a failed registration must not check the box. */
+    DWORD wait = WaitForSingleObject(process.hProcess, INFINITE);
+    int ok = wait == WAIT_OBJECT_0 && GetExitCodeProcess(process.hProcess, &code) && code == 0;
+    CloseHandle(process.hProcess);
+    return ok;
+}
+
+/* Escape a PowerShell single-quoted literal (including embedded apostrophes). */
+static void autorun_literal(wchar_t *out, const wchar_t *value) {
+    *out++ = L'\'';
+    while (*value) {
+        if (*value == L'\'') *out++ = L'\'';
+        *out++ = *value++;
+    }
+    *out++ = L'\'';
+    *out = 0;
+}
+
 int ui_get_autorun(void) {
-    HKEY key;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS)
-        return 0;
-    DWORD type = 0, size = 0;
-    LONG result = RegQueryValueExW(key, RUN_VALUE, NULL, &type, NULL, &size);
-    RegCloseKey(key);
-    return result == ERROR_SUCCESS && type == REG_SZ && size > sizeof(wchar_t);
+    return autorun_script(
+        L"$ErrorActionPreference='Stop'; try {"
+        L"$t=Get-ScheduledTask -TaskPath '\\' -TaskName '" AUTORUN_TASK L"';"
+        L"if ($t.Settings.Enabled -and $t.Principal.RunLevel -eq 'Highest' "
+        L"-and $t.Principal.LogonType -eq 'Interactive' "
+        L"-and @($t.Triggers | Where-Object {$_.Enabled}).Count -gt 0) {exit 0};"
+        L"exit 1 } catch {exit 1}");
 }
 int ui_set_autorun(int enable) {
-    HKEY key;
-    wchar_t exe[MAX_PATH], directory[MAX_PATH], command[MAX_PATH * 2 + 64];
+    wchar_t script[4096];
     if (enable) {
+        wchar_t exe[MAX_PATH], directory[MAX_PATH];
+        wchar_t exe_literal[MAX_PATH * 2 + 3], dir_literal[MAX_PATH * 2 + 3];
         DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH);
         DWORD d = GetCurrentDirectoryW(MAX_PATH, directory);
         if (!n || n >= MAX_PATH || !d || d >= MAX_PATH) return 0;
-        /* Appending \\. keeps a drive root's backslash away from the quote. */
-        if (swprintf(command, sizeof(command)/sizeof(*command),
-                     L"\"%ls\" --autostart \"%ls\\.\"", exe, directory) < 0) return 0;
+        autorun_literal(exe_literal, exe);
+        autorun_literal(dir_literal, directory);
+        int length = swprintf(script, sizeof(script)/sizeof(*script),
+            L"$ErrorActionPreference='Stop'; try {"
+            L"$exe=%ls; $dir=%ls;"
+            L"$user=[Security.Principal.WindowsIdentity]::GetCurrent().Name;"
+            L"$a=New-ScheduledTaskAction -Execute $exe "
+            L"-Argument ('--autostart '+[char]34+$dir+'\\.'+[char]34) -WorkingDirectory $dir;"
+            L"$t=New-ScheduledTaskTrigger -AtLogOn -User $user;"
+            L"$p=New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest;"
+            L"$s=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries "
+            L"-ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew;"
+            L"Register-ScheduledTask -TaskPath '\\' -TaskName '" AUTORUN_TASK L"' "
+            L"-Action $a -Trigger $t -Principal $p -Settings $s -Force | Out-Null;"
+            L"exit 0 } catch {exit 1}", exe_literal, dir_literal);
+        if (length < 0 || length >= sizeof(script)/sizeof(*script)) return 0;
+    } else {
+        wcscpy(script,
+            L"$ErrorActionPreference='Stop'; try {"
+            L"$t=Get-ScheduledTask -TaskPath '\\' | Where-Object {$_.TaskName -eq '" AUTORUN_TASK L"'};"
+            L"if ($t) {$t | Unregister-ScheduledTask -Confirm:$false};"
+            L"exit 0 } catch {exit 1}");
     }
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, NULL, 0, KEY_SET_VALUE,
-                        NULL, &key, NULL) != ERROR_SUCCESS) return 0;
-    LONG result = enable ? RegSetValueExW(key, RUN_VALUE, 0, REG_SZ,
-                           (const BYTE *)command, (DWORD)((wcslen(command) + 1) * sizeof(wchar_t)))
-                         : RegDeleteValueW(key, RUN_VALUE);
+    if (!autorun_script(script)) return 0;
+    /* Remove the legacy entry only after the task operation succeeds. */
+    HKEY key;
+    LONG result = RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_SET_VALUE, &key);
+    if (result == ERROR_FILE_NOT_FOUND) return 1;
+    if (result != ERROR_SUCCESS) return 0;
+    result = RegDeleteValueW(key, RUN_VALUE);
     RegCloseKey(key);
-    return result == ERROR_SUCCESS || (!enable && result == ERROR_FILE_NOT_FOUND);
+    return result == ERROR_SUCCESS || result == ERROR_FILE_NOT_FOUND;
 }
 int ui_autorun_workdir(void) {
     int count = 0;
